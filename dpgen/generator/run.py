@@ -2457,6 +2457,7 @@ def _select_by_model_devi_adaptive_trust_low(
 def _select_by_plumed_colvar(
         
 ):
+
     pass
 
 def _make_fp_vasp_inner(

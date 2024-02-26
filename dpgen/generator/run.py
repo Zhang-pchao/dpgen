@@ -2454,6 +2454,10 @@ def _select_by_model_devi_adaptive_trust_low(
 
     return accur, candi, failed, counter, f_trust_lo, v_trust_lo
 
+def _select_by_plumed_colvar(
+        
+):
+    pass
 
 def _make_fp_vasp_inner(
     iter_index,

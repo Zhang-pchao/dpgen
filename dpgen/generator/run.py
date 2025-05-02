@@ -2456,7 +2456,7 @@ def _read_plumed_colvar_file(
         # Check if all requested columns exist
         max_col_idx = max(model_devi_colvar_columns)
         if colvar_data.shape[1] <= max_col_idx + 1:
-            dlog.error(f"COLVAR file does not have all requested columns. Max column index is {max_col_idx + 1}, but file has {colvar_data.shape[1]} columns.")
+            dlog.error(f"COLVAR file does not have all requested columns. Need data column index up to {max_col_idx} (0-based, excluding time), but file has only {colvar_data.shape[1] - 1} data columns.")
             return None
             
         # Extract time and selected CV columns

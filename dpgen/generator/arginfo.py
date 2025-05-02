@@ -378,6 +378,34 @@ The union of the two sets is made as candidate dataset."
     doc_epsilon_v = (
         "The level parameter for computing the relative virial model deviation."
     )
+    
+    doc_model_devi_use_plumed_colvar = (
+        "Whether to use PLUMED collective variable values for additional filtering of frame selection. "
+        "When True, it requires both model deviation and COLVAR criteria to be met."
+    )
+    doc_model_devi_colvar_lo = (
+        "Lower bound(s) of PLUMED collective variable(s) for selection. "
+        "Can be a single value for all columns or a list of values (one per column). "
+        "For multi-range selection, use a list of lists: [[lo1, lo2], [lo3, lo4]] for two ranges on two columns. "
+        "If a list or dict, should be set for each index in sys_configs, respectively."
+    )
+    doc_model_devi_colvar_hi = (
+        "Upper bound(s) of PLUMED collective variable(s) for selection. "
+        "Can be a single value for all columns or a list of values (one per column). "
+        "For multi-range selection, use a list of lists: [[hi1, hi2], [hi3, hi4]] for two ranges on two columns. "
+        "If a list or dict, should be set for each index in sys_configs, respectively."
+    )
+    doc_model_devi_colvar_columns = (
+        "Column index or indices in PLUMED COLVAR file to use for selection (0-based, excluding time column). "
+        "Can be a single index or a list of indices for multiple columns. "
+        "Default is 2, which is typically the 3rd column in the COLVAR file (after time and another CV)."
+    )
+    doc_model_devi_colvar_uniform = (
+        "Whether to select frames uniformly across the CV range. "
+        "This ensures selected frames are well-distributed across the CV space rather than "
+        "potentially clustered in specific regions. The maximum number of frames selected "
+        "is controlled by the fp_task_max parameter."
+    )
 
     return [
         model_devi_jobs_args(),
@@ -475,22 +503,52 @@ The union of the two sets is made as candidate dataset."
         ),
         Argument(
             "model_devi_plumed_path",
-            bool,
+            str,
             optional=True,
-            default=False,
             doc=doc_model_devi_plumed_path,
         ),
         Argument(
-            "shuffle_poscar", bool, optional=True, default=False, doc=doc_shuffle_poscar
+            "shuffle_poscar", bool, optional=True, doc=doc_shuffle_poscar
         ),
-        Argument(
-            "use_relative", bool, optional=True, default=False, doc=doc_use_relative
-        ),
+        Argument("use_relative", bool, optional=True, doc=doc_use_relative),
         Argument("epsilon", float, optional=True, doc=doc_epsilon),
-        Argument(
-            "use_relative_v", bool, optional=True, default=False, doc=doc_use_relative_v
-        ),
+        Argument("use_relative_v", bool, optional=True, doc=doc_use_relative_v),
         Argument("epsilon_v", float, optional=True, doc=doc_epsilon_v),
+        Argument(
+            "model_devi_use_plumed_colvar",
+            bool,
+            optional=True,
+            default=False,
+            doc=doc_model_devi_use_plumed_colvar,
+        ),
+        Argument(
+            "model_devi_colvar_lo",
+            [float, list[float], dict],
+            optional=True,
+            default=-float('inf'),
+            doc=doc_model_devi_colvar_lo,
+        ),
+        Argument(
+            "model_devi_colvar_hi",
+            [float, list[float], dict],
+            optional=True,
+            default=float('inf'),
+            doc=doc_model_devi_colvar_hi,
+        ),
+        Argument(
+            "model_devi_colvar_columns",
+            [int, list[int]],
+            optional=True,
+            default=2,
+            doc=doc_model_devi_colvar_columns,
+        ),
+        Argument(
+            "model_devi_colvar_uniform",
+            bool,
+            optional=True,
+            default=False,
+            doc=doc_model_devi_colvar_uniform,
+        ),
     ]
 
 

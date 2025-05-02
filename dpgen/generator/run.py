@@ -26,7 +26,7 @@ import warnings
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import dpdata
 import numpy as np
@@ -2335,6 +2335,388 @@ def _read_model_devi_file(
     return model_devi
 
 
+def _read_plumed_colvar_file(
+    task_path: str,
+    model_devi_colvar_columns: Union[int, list[int]] = 2,
+):
+    """Read PLUMED COLVAR file to get collective variable values.
+    
+    Parameters
+    ----------
+    task_path : str
+        Path to the model deviation task directory
+    model_devi_colvar_columns : Union[int, list[int]], optional
+        Column indices in the COLVAR file to use (0-based, excluding time column)
+        Can be a single column index or a list of indices, default is 2
+        
+    Returns
+    -------
+    np.ndarray
+        Array with time and collective variable values
+    """
+    colvar_files = glob.glob(os.path.join(task_path, "COLVAR*"))
+    if not colvar_files:
+        dlog.warning(f"No COLVAR files found in {task_path}")
+        return None
+    
+    if len(colvar_files) > 1:
+        # Similar to model_devi files, handle multiple COLVAR files from PIMD
+        colvar_files_sorted = sorted(
+            colvar_files,
+            key=lambda x: int(re.search(r"COLVAR\.(\d+)", x).group(1)) if re.search(r"COLVAR\.(\d+)", x) else 0,
+        )
+        
+        # Read the first file to get headers
+        with open(colvar_files_sorted[0]) as f:
+            first_line = f.readline().strip()
+            
+        if not first_line.startswith("#"):
+            first_line = "#"
+            
+        num_beads = len(colvar_files_sorted)
+        colvar_contents = []
+        
+        for file in colvar_files_sorted:
+            # Skip comment lines that start with #
+            data = np.loadtxt(file, comments="#")
+            if data.ndim == 1:  # Handle case with only one row
+                data = data.reshape(1, -1)
+            colvar_contents.append(data)
+            
+        # Check all files have same number of lines
+        assert all(
+            content.shape[0] == colvar_contents[0].shape[0]
+            for content in colvar_contents
+        ), "Not all beads generated the same number of lines in COLVAR files"
+        
+        # Process timestepping similar to model_devi files
+        last_step = colvar_contents[0][-1, 0]
+        for ibead in range(1, num_beads):
+            colvar_contents[ibead][:, 0] = colvar_contents[ibead][:, 0] + ibead * (last_step + 1)
+            
+        colvar_data = np.concatenate(colvar_contents, axis=0)
+        
+        # Write combined COLVAR file
+        num_columns = colvar_data.shape[1]
+        formats = ["%12d"] + ["%22.6e"] * (num_columns - 1)
+        np.savetxt(
+            os.path.join(task_path, "COLVAR.combined"),
+            colvar_data,
+            fmt=formats,
+            header=first_line.rstrip(),
+            comments="",
+        )
+        
+        # Use the combined file for analysis
+        colvar_file = os.path.join(task_path, "COLVAR.combined")
+    else:
+        colvar_file = colvar_files[0]
+    
+    # Load COLVAR data - handle comment lines that start with #
+    try:
+        colvar_data = np.loadtxt(colvar_file, comments="#")
+        if colvar_data.ndim == 1:  # Handle case with only one row
+            colvar_data = colvar_data.reshape(1, -1)
+            
+        # Make model_devi_colvar_columns a list if it's not already
+        if not isinstance(model_devi_colvar_columns, list):
+            model_devi_colvar_columns = [model_devi_colvar_columns]
+            
+        # Check if all requested columns exist
+        max_col_idx = max(model_devi_colvar_columns)
+        if colvar_data.shape[1] <= max_col_idx + 1:
+            dlog.error(f"COLVAR file does not have all requested columns. Max column index is {max_col_idx + 1}, but file has {colvar_data.shape[1]} columns.")
+            return None
+            
+        # Extract time and selected CV columns
+        # Add 1 to model_devi_colvar_columns because column 0 is time
+        selected_cols = [0] + [col + 1 for col in model_devi_colvar_columns]
+        return colvar_data[:, selected_cols]
+    except Exception as e:
+        dlog.error(f"Error reading COLVAR file {colvar_file}: {str(e)}")
+        return None
+
+
+def _select_by_plumed_colvar(
+    modd_system_task: list[str],
+    f_trust_lo: float,
+    f_trust_hi: float,
+    v_trust_lo: float,
+    v_trust_hi: float,
+    colvar_lo: Union[float, list[float], list[list[float]]],
+    colvar_hi: Union[float, list[float], list[list[float]]],
+    colvar_columns: Union[int, list[int]],
+    cluster_cutoff: float,
+    model_devi_engine: str,
+    model_devi_skip: int = 0,
+    model_devi_f_avg_relative: bool = False,
+    model_devi_merge_traj: bool = False,
+    detailed_report_make_fp: bool = True,
+    uniform_selection: bool = False,
+):
+    """Select configurations based on both model deviation and PLUMED COLVAR values.
+    
+    This function first filters configurations based on force/virial model deviation,
+    then further filters based on collective variable values from PLUMED.
+    
+    Parameters
+    ----------
+    modd_system_task : list[str]
+        List of paths to model deviation tasks
+    f_trust_lo : float
+        Lower bound of force model deviation for selection
+    f_trust_hi : float
+        Upper bound of force model deviation for selection
+    v_trust_lo : float
+        Lower bound of virial model deviation for selection
+    v_trust_hi : float
+        Upper bound of virial model deviation for selection
+    colvar_lo : Union[float, list[float], list[list[float]]]
+        Lower bound(s) of collective variable value(s) for selection
+        Can be a single value, a list of values (one per column), or a list of lists for multiple ranges
+        If multiple columns are used, this should be a list of the same length
+    colvar_hi : Union[float, list[float], list[list[float]]]
+        Upper bound(s) of collective variable value(s) for selection
+        Can be a single value, a list of values (one per column), or a list of lists for multiple ranges
+        If multiple columns are used, this should be a list of the same length
+    colvar_columns : Union[int, list[int]]
+        Column index or indices in COLVAR file to use (0-based, excluding time column)
+    cluster_cutoff : float
+        Cutoff for clustering, used in model deviation selection
+    model_devi_engine : str
+        Engine used for model deviation calculation
+    model_devi_skip : int
+        Number of initial frames to skip
+    model_devi_f_avg_relative : bool
+        Whether to use relative force model deviation
+    model_devi_merge_traj : bool
+        Whether trajectories were merged
+    detailed_report_make_fp : bool
+        Whether to generate detailed reports
+    uniform_selection : bool
+        Whether to select frames uniformly across the CV ranges
+        The max number of frames selected is controlled by fp_task_max in the outer scope
+        
+    Returns
+    -------
+    tuple
+        (accurate_configs, candidate_configs, failed_configs, counter, candidate_cv_values)
+        candidate_cv_values is a dictionary mapping candidate frames to their CV values for later processing
+    """
+    if model_devi_engine == "calypso":
+        iter_name = modd_system_task[0].split("/")[0]
+        _work_path = os.path.join(iter_name, model_devi_name)
+        calypso_run_opt_path = glob.glob(f"{_work_path}/{calypso_run_opt_name}.*")[0]
+        numofspecies = _parse_calypso_input("NumberOfSpecies", calypso_run_opt_path)
+        min_dis = _parse_calypso_dis_mtx(numofspecies, calypso_run_opt_path)
+    
+    # Ensure colvar_columns is a list
+    if not isinstance(colvar_columns, list):
+        colvar_columns = [colvar_columns]
+    
+    # Convert single values to lists
+    if not isinstance(colvar_lo, list):
+        colvar_lo = [colvar_lo] * len(colvar_columns)
+    
+    if not isinstance(colvar_hi, list):
+        colvar_hi = [colvar_hi] * len(colvar_columns)
+    
+    # Check if we're using multi-range intervals (if the first element is a list)
+    using_multi_range = False
+    if len(colvar_lo) > 0 and isinstance(colvar_lo[0], list):
+        using_multi_range = True
+        # Ensure each column has at least one range
+        if len(colvar_lo) != len(colvar_columns):
+            dlog.error("For multi-range selection, each column must have its ranges defined")
+            raise ValueError("For multi-range selection, each column must have its ranges defined")
+        
+        # Check consistency of range lists
+        for ranges_lo, ranges_hi in zip(colvar_lo, colvar_hi):
+            if not isinstance(ranges_hi, list) or len(ranges_lo) != len(ranges_hi):
+                dlog.error("Inconsistent range definitions in colvar_lo and colvar_hi")
+                raise ValueError("Inconsistent range definitions in colvar_lo and colvar_hi")
+    elif len(colvar_lo) != len(colvar_columns) or len(colvar_hi) != len(colvar_columns):
+        dlog.error("Length mismatch between colvar_columns, colvar_lo, and colvar_hi")
+        raise ValueError("Length mismatch between colvar_columns, colvar_lo, and colvar_hi")
+        
+    fp_candidate = []
+    fp_rest_accurate = []
+    fp_rest_failed = []
+    cc = 0
+    counter = Counter()
+    counter["candidate"] = 0
+    counter["failed"] = 0
+    counter["accurate"] = 0
+
+    # Dictionary to collect candidate frames with their CV values for potential uniform selection
+    uniform_candidates = {}
+    
+    for tt in modd_system_task:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # First get model deviation data
+            all_conf = _read_model_devi_file(
+                tt, model_devi_f_avg_relative, model_devi_merge_traj
+            )
+            
+            # Then get COLVAR data
+            colvar_data = _read_plumed_colvar_file(tt, colvar_columns)
+            
+            # Check if we got valid data
+            if colvar_data is None or all_conf is None:
+                dlog.warning(f"Missing model deviation or COLVAR data for {tt}, skipping")
+                continue
+                
+            # Handle single-row data
+            if all_conf.shape == (7,):
+                all_conf = all_conf.reshape(1, all_conf.shape[0])
+            elif model_devi_engine == "calypso" and all_conf.shape == (8,):
+                all_conf = all_conf.reshape(1, all_conf.shape[0])
+                
+            # Create a dictionary mapping timesteps to CV values for fast lookup
+            # The first column (index 0) of colvar_data is the time
+            # The rest are the CV values corresponding to colvar_columns
+            colvar_dict = {int(row[0]): row[1:] for row in colvar_data}
+            
+            for ii in range(all_conf.shape[0]):
+                if all_conf[ii][0] < model_devi_skip:
+                    continue
+                    
+                cc = int(all_conf[ii][0])
+                
+                # Check if we have colvar data for this timestep
+                if cc not in colvar_dict:
+                    dlog.debug(f"No COLVAR data for timestep {cc} in {tt}, skipping")
+                    continue
+                    
+                cv_values = colvar_dict[cc]
+                
+                if cluster_cutoff is None:
+                    if model_devi_engine == "calypso":
+                        if float(all_conf[ii][-1]) <= float(min_dis):
+                            if detailed_report_make_fp:
+                                fp_rest_failed.append([tt, cc])
+                            counter["failed"] += 1
+                            continue
+                    
+                    # Check CV criteria (for single ranges or multi-ranges)
+                    colvar_in_range = True
+                    
+                    if using_multi_range:
+                        # For multi-range: check if CV value is in any of the specified ranges
+                        for j, cv_value in enumerate(cv_values):
+                            cv_in_any_range = False
+                            for range_idx in range(len(colvar_lo[j])):
+                                lo = colvar_lo[j][range_idx]
+                                hi = colvar_hi[j][range_idx]
+                                if cv_value >= lo and cv_value < hi:
+                                    cv_in_any_range = True
+                                    break
+                            if not cv_in_any_range:
+                                colvar_in_range = False
+                                break
+                    else:
+                        # For single ranges: check if CV value is within the specified range
+                        for j, cv_value in enumerate(cv_values):
+                            if cv_value < colvar_lo[j] or cv_value >= colvar_hi[j]:
+                                colvar_in_range = False
+                                break
+                    
+                    # Check both model deviation and colvar criteria
+                    force_in_range = all_conf[ii][4] < f_trust_hi and all_conf[ii][4] >= f_trust_lo
+                    virial_in_range = all_conf[ii][1] < v_trust_hi and all_conf[ii][1] >= v_trust_lo
+                    
+                    # If both model deviation and colvar criteria are met, potentially add to candidates
+                    if (force_in_range or virial_in_range) and colvar_in_range:
+                        # Store the CV values regardless of uniform selection mode
+                        # This allows post-processing for uniform selection after this function
+                        uniform_candidates[(tt, cc)] = cv_values
+                        fp_candidate.append([tt, cc])
+                        counter["candidate"] += 1
+                    # If model deviation is too high or colvar is out of range, add to failed
+                    elif (all_conf[ii][1] >= v_trust_hi) or (all_conf[ii][4] >= f_trust_hi) or not colvar_in_range:
+                        if detailed_report_make_fp:
+                            fp_rest_failed.append([tt, cc])
+                        counter["failed"] += 1
+                    # If both model deviation and colvar are good (below lower thresholds), add to accurate
+                    elif all_conf[ii][1] < v_trust_lo and all_conf[ii][4] < f_trust_lo and colvar_in_range:
+                        if detailed_report_make_fp:
+                            fp_rest_accurate.append([tt, cc])
+                        counter["accurate"] += 1
+                    else:
+                        if model_devi_engine == "calypso":
+                            dlog.info(
+                                "ase opt traj %s frame %d with f devi %f and cv values %s does not belong to either accurate, candidate and failed"
+                                % (tt, ii, all_conf[ii][4], str(cv_values))
+                            )
+                        else:
+                            dlog.warning(
+                                "md traj %s frame %d with f devi %f and cv values %s does not belong to either accurate, candidate and failed"
+                                % (tt, ii, all_conf[ii][4], str(cv_values))
+                            )
+                else:
+                    # Handle cluster cases
+                    # Check CV criteria (for single ranges or multi-ranges)
+                    colvar_in_range = True
+                    
+                    if using_multi_range:
+                        # For multi-range: check if CV value is in any of the specified ranges
+                        for j, cv_value in enumerate(cv_values):
+                            cv_in_any_range = False
+                            for range_idx in range(len(colvar_lo[j])):
+                                lo = colvar_lo[j][range_idx]
+                                hi = colvar_hi[j][range_idx]
+                                if cv_value >= lo and cv_value < hi:
+                                    cv_in_any_range = True
+                                    break
+                            if not cv_in_any_range:
+                                colvar_in_range = False
+                                break
+                    else:
+                        # For single ranges: check if CV value is within the specified range
+                        for j, cv_value in enumerate(cv_values):
+                            if cv_value < colvar_lo[j] or cv_value >= colvar_hi[j]:
+                                colvar_in_range = False
+                                break
+                            
+                    # Skip clusters with CV values outside range
+                    if not colvar_in_range:
+                        continue
+                        
+                    idx_candidate = np.where(
+                        np.logical_and(
+                            all_conf[ii][7:] < f_trust_hi,
+                            all_conf[ii][7:] >= f_trust_lo,
+                        )
+                    )[0]
+                    
+                    if uniform_selection:
+                        # Store candidates for later uniform selection
+                        for jj in idx_candidate:
+                            uniform_candidates[(tt, cc, jj)] = cv_values
+                    else:
+                        for jj in idx_candidate:
+                            fp_candidate.append([tt, cc, jj])
+                        counter["candidate"] += len(idx_candidate)
+                    
+                    idx_rest_accurate = np.where(all_conf[ii][7:] < f_trust_lo)[0]
+                    if detailed_report_make_fp:
+                        for jj in idx_rest_accurate:
+                            fp_rest_accurate.append([tt, cc, jj])
+                    counter["accurate"] += len(idx_rest_accurate)
+                    
+                    idx_rest_failed = np.where(all_conf[ii][7:] >= f_trust_hi)[0]
+                    if detailed_report_make_fp:
+                        for jj in idx_rest_failed:
+                            fp_rest_failed.append([tt, cc, jj])
+                    counter["failed"] += len(idx_rest_failed)
+
+    # We no longer apply uniform selection here - we return the candidates and their CV values
+    # for later processing
+
+    return fp_rest_accurate, fp_candidate, fp_rest_failed, counter, uniform_candidates
+
+
 def _select_by_model_devi_standard(
     modd_system_task: list[str],
     f_trust_lo: float,
@@ -2546,8 +2928,8 @@ def _make_fp_vasp_inner(
     v_trust_hi,
     f_trust_lo,
     f_trust_hi,
-    fp_task_min,
     fp_task_max,
+    fp_task_min,
     fp_link_files,
     type_map,
     jdata,
@@ -2615,6 +2997,13 @@ def _make_fp_vasp_inner(
     skip_bad_box = jdata.get("fp_skip_bad_box")
     # skip discrete structure in cluster
     fp_cluster_vacuum = jdata.get("fp_cluster_vacuum", None)
+    # use PLUMED COLVAR for selection
+    model_devi_use_plumed_colvar = jdata.get("model_devi_use_plumed_colvar", False)
+    model_devi_colvar_lo = jdata.get("model_devi_colvar_lo", -float('inf'))
+    model_devi_colvar_hi = jdata.get("model_devi_colvar_hi", float('inf'))
+    model_devi_colvar_columns = jdata.get("model_devi_colvar_columns", 2)
+    model_devi_colvar_uniform = jdata.get("model_devi_colvar_uniform", False)
+    model_devi_colvar_max_select = jdata.get("model_devi_colvar_max_select", None)
 
     def _trust_limitation_check(sys_idx, lim):
         if isinstance(lim, list):
@@ -2635,9 +3024,141 @@ def _make_fp_vasp_inner(
             f_trust_hi_sys = _trust_limitation_check(int(ss), f_trust_hi)
             v_trust_lo_sys = _trust_limitation_check(int(ss), v_trust_lo)
             v_trust_hi_sys = _trust_limitation_check(int(ss), v_trust_hi)
+            
+            # Get system-specific values for COLVAR thresholds
+            # Handle both single value and multiple columns/values cases
+            if isinstance(model_devi_colvar_columns, list):
+                colvar_columns_sys = model_devi_colvar_columns
+                
+                # If colvar_lo is a list of lists/dicts (one per system and column)
+                if isinstance(model_devi_colvar_lo, (list, dict)) and any(isinstance(x, (list, dict)) for x in model_devi_colvar_lo):
+                    colvar_lo_sys = _trust_limitation_check(int(ss), model_devi_colvar_lo)
+                else:
+                    # If colvar_lo is a simple list (one per column, same for all systems)
+                    colvar_lo_sys = model_devi_colvar_lo
+                
+                # If colvar_hi is a list of lists/dicts (one per system and column)
+                if isinstance(model_devi_colvar_hi, (list, dict)) and any(isinstance(x, (list, dict)) for x in model_devi_colvar_hi):
+                    colvar_hi_sys = _trust_limitation_check(int(ss), model_devi_colvar_hi)
+                else:
+                    # If colvar_hi is a simple list (one per column, same for all systems)
+                    colvar_hi_sys = model_devi_colvar_hi
+            else:
+                # Single column case
+                colvar_columns_sys = model_devi_colvar_columns
+                colvar_lo_sys = _trust_limitation_check(int(ss), model_devi_colvar_lo) if isinstance(model_devi_colvar_lo, (list, dict)) else model_devi_colvar_lo
+                colvar_hi_sys = _trust_limitation_check(int(ss), model_devi_colvar_hi) if isinstance(model_devi_colvar_hi, (list, dict)) else model_devi_colvar_hi
 
             # assumed e -> v
-            if not model_devi_adapt_trust_lo:
+            if model_devi_use_plumed_colvar:
+                # Use PLUMED COLVAR for selection
+                if isinstance(colvar_columns_sys, list):
+                    dlog.info(f"Using PLUMED COLVAR for selection with multiple CV columns: {colvar_columns_sys}")
+                    for i, col in enumerate(colvar_columns_sys):
+                        if isinstance(colvar_lo_sys, list) and isinstance(colvar_lo_sys[i], list):
+                            # Multi-range case
+                            ranges_info = []
+                            for j in range(len(colvar_lo_sys[i])):
+                                lo = colvar_lo_sys[i][j]
+                                hi = colvar_hi_sys[i][j]
+                                ranges_info.append(f"[{lo}, {hi})")
+                            dlog.info(f"  Column {col}: ranges {', '.join(ranges_info)}")
+                        else:
+                            # Single range case
+                            lo = colvar_lo_sys[i] if isinstance(colvar_lo_sys, list) else colvar_lo_sys
+                            hi = colvar_hi_sys[i] if isinstance(colvar_hi_sys, list) else colvar_hi_sys
+                            dlog.info(f"  Column {col}: range [{lo}, {hi})")
+                else:
+                    if isinstance(colvar_lo_sys, list) and isinstance(colvar_lo_sys[0], list):
+                        # Multi-range case for a single column
+                        ranges_info = []
+                        for j in range(len(colvar_lo_sys[0])):
+                            lo = colvar_lo_sys[0][j]
+                            hi = colvar_hi_sys[0][j]
+                            ranges_info.append(f"[{lo}, {hi})")
+                        dlog.info(f"Using PLUMED COLVAR for selection with CV column {colvar_columns_sys} and ranges: {', '.join(ranges_info)}")
+                    else:
+                        # Single range for a single column
+                        dlog.info(f"Using PLUMED COLVAR for selection with CV column {colvar_columns_sys} and range: [{colvar_lo_sys}, {colvar_hi_sys})")
+                
+                if model_devi_colvar_uniform:
+                    dlog.info(f"Using uniform selection across CV values with fp_task_max={fp_task_max}")
+                
+                (
+                    fp_rest_accurate,
+                    fp_candidate,
+                    fp_rest_failed,
+                    counter,
+                    candidate_cv_values
+                ) = _select_by_plumed_colvar(
+                    modd_system_task,
+                    f_trust_lo_sys,
+                    f_trust_hi_sys,
+                    v_trust_lo_sys,
+                    v_trust_hi_sys,
+                    colvar_lo_sys,
+                    colvar_hi_sys,
+                    colvar_columns_sys,
+                    cluster_cutoff,
+                    model_devi_engine,
+                    model_devi_skip,
+                    model_devi_f_avg_relative=model_devi_f_avg_relative,
+                    model_devi_merge_traj=model_devi_merge_traj,
+                    detailed_report_make_fp=detailed_report_make_fp,
+                    uniform_selection=model_devi_colvar_uniform,
+                )
+                
+                # Apply uniform selection here, using fp_task_max
+                if model_devi_colvar_uniform and candidate_cv_values:
+                    dlog.info(f"Applying uniform selection from {len(fp_candidate)} candidate frames with max tasks {fp_task_max}")
+                    
+                    # Determine number of frames to select - respect fp_task_max
+                    n_select = min(fp_task_max, len(fp_candidate))
+                    
+                    # If we have multiple CV columns, we'll use the first one for uniform selection
+                    # (It's hard to uniformly sample in multiple dimensions simultaneously)
+                    primary_cv_idx = 0  # Use the first CV column for uniform selection
+                    
+                    # Extract frames and CV values for sorting
+                    candidates_with_cv = []
+                    for i, frame in enumerate(fp_candidate):
+                        if len(frame) == 2:  # Regular frame [tt, cc]
+                            key = (frame[0], frame[1])
+                        else:  # Cluster frame [tt, cc, jj]
+                            key = (frame[0], frame[1], frame[2])
+                        
+                        if key in candidate_cv_values:
+                            candidates_with_cv.append((i, candidate_cv_values[key][primary_cv_idx]))
+                    
+                    # Sort by CV value
+                    candidates_with_cv.sort(key=lambda x: x[1])
+                    
+                    # Select frames uniformly from the sorted list
+                    if n_select >= len(candidates_with_cv):
+                        # If we want all frames, just use them all
+                        selected_indices = [x[0] for x in candidates_with_cv]
+                    else:
+                        # Calculate step size for uniform selection
+                        step = len(candidates_with_cv) / n_select
+                        # Generate indices at regular intervals
+                        selected_indices = [candidates_with_cv[min(int(i * step), len(candidates_with_cv) - 1)][0] for i in range(n_select)]
+                    
+                    # Create new candidate list from selected frames
+                    new_fp_candidate = [fp_candidate[idx] for idx in selected_indices]
+                    fp_candidate = new_fp_candidate
+                    
+                    # Update counter
+                    counter["candidate"] = len(fp_candidate)
+                    dlog.info(f"Selected {len(fp_candidate)} frames with uniform distribution across CV values")
+                
+                elif len(fp_candidate) > fp_task_max:
+                    # Standard random selection if not using uniform selection
+                    random.shuffle(fp_candidate)
+                    fp_candidate = fp_candidate[:fp_task_max]
+                    counter["candidate"] = len(fp_candidate)
+                    dlog.info(f"Randomly selected {len(fp_candidate)} frames from {len(candidate_cv_values)} candidates")
+            
+            elif not model_devi_adapt_trust_lo:
                 (
                     fp_rest_accurate,
                     fp_candidate,
@@ -2656,33 +3177,9 @@ def _make_fp_vasp_inner(
                     model_devi_merge_traj=model_devi_merge_traj,
                     detailed_report_make_fp=detailed_report_make_fp,
                 )
-            else:
-                numb_candi_f = jdata.get("model_devi_numb_candi_f", 10)
-                numb_candi_v = jdata.get("model_devi_numb_candi_v", 0)
-                perc_candi_f = jdata.get("model_devi_perc_candi_f", 0.0)
-                perc_candi_v = jdata.get("model_devi_perc_candi_v", 0.0)
-                (
-                    fp_rest_accurate,
-                    fp_candidate,
-                    fp_rest_failed,
-                    counter,
-                    f_trust_lo_ad,
-                    v_trust_lo_ad,
-                ) = _select_by_model_devi_adaptive_trust_low(
-                    modd_system_task,
-                    f_trust_hi_sys,
-                    numb_candi_f,
-                    perc_candi_f,
-                    v_trust_hi_sys,
-                    numb_candi_v,
-                    perc_candi_v,
-                    model_devi_skip=model_devi_skip,
-                    model_devi_f_avg_relative=model_devi_f_avg_relative,
-                    model_devi_merge_traj=model_devi_merge_traj,
-                )
                 dlog.info(
                     "system {:s} {:9s} : f_trust_lo {:6.3f}   v_trust_lo {:6.3f}".format(
-                        ss, "adapted", f_trust_lo_ad, v_trust_lo_ad
+                        ss, "adapted", f_trust_lo_sys, v_trust_lo_sys
                     )
                 )
         elif model_devi_engine == "amber":

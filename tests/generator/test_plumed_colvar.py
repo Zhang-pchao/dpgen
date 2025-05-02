@@ -202,5 +202,212 @@ class TestPlumedColvar(unittest.TestCase):
         # Check counter - should reflect all candidates
         self.assertEqual(counter["candidate"], len(fp_candidate))
 
+    def test_update_model_devi_with_colvar(self):
+        """Test updating model_devi.out with CV values from COLVAR."""
+        # Create a mock model_devi.out file
+        model_devi_data = np.array([
+            [1, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06],  # frame 1
+            [2, 0.02, 0.03, 0.04, 0.10, 0.06, 0.07],  # frame 2
+            [3, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007],  # frame 3
+            [4, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07],  # frame 4
+        ])
+        model_devi_file = self.task_dir / "model_devi.out"
+        np.savetxt(model_devi_file, model_devi_data, fmt="%12d %22.6e %22.6e %22.6e %22.6e %22.6e %22.6e", 
+                  header="step v_diff v_diff_x v_diff_y v_diff_z f_max f_min", comments="#")
+        
+        # Create a mock COLVAR file with one column (excluding time)
+        colvar_data = np.array([
+            [1, 0.5],   # frame 1: CV = 0.5
+            [2, 1.2],   # frame 2: CV = 1.2
+            [3, 0.8],   # frame 3: CV = 0.8
+            [4, 1.5],   # frame 4: CV = 1.5
+        ])
+        colvar_file = self.task_dir / "COLVAR"
+        np.savetxt(colvar_file, colvar_data, fmt="%12d %22.6e", 
+                  header="#! FIELDS time cv1", comments="")
+        
+        # Define a function to update model_devi.out with CV values
+        def update_model_devi_with_colvar(task_path, colvar_columns=0):
+            """Update model_devi.out with CV values from COLVAR file.
+            
+            Parameters
+            ----------
+            task_path : str or Path
+                Path to the task directory containing model_devi.out and COLVAR files
+            colvar_columns : int or list
+                Column(s) to extract from COLVAR (0-based, excluding time column)
+                
+            Returns
+            -------
+            bool
+                True if CV values were successfully added, False otherwise
+            """
+            # Convert to Path object
+            task_path = Path(task_path)
+            
+            # Read model_devi.out file
+            model_devi_file = task_path / "model_devi.out"
+            if not model_devi_file.exists():
+                return False
+            
+            try:
+                model_devi_data = np.loadtxt(model_devi_file)
+                if model_devi_data.ndim == 1:  # Handle case with only one row
+                    model_devi_data = model_devi_data.reshape(1, -1)
+                
+                # Read COLVAR file
+                colvar_file = task_path / "COLVAR"
+                if not colvar_file.exists():
+                    return False
+                    
+                colvar_data = np.loadtxt(colvar_file, comments="#")
+                if colvar_data.ndim == 1:  # Handle case with only one row
+                    colvar_data = colvar_data.reshape(1, -1)
+                
+                # Make colvar_columns a list if it's not already
+                if not isinstance(colvar_columns, list):
+                    colvar_columns = [colvar_columns]
+                    
+                # Check if all requested columns exist
+                max_col_idx = max(colvar_columns)
+                if colvar_data.shape[1] <= max_col_idx + 1:
+                    return False
+                
+                # Create a dictionary mapping timesteps to CV values for fast lookup
+                colvar_dict = {}
+                for row in colvar_data:
+                    time = int(row[0])
+                    cv_values = []
+                    for col_idx in colvar_columns:
+                        cv_values.append(row[col_idx + 1])  # +1 because column 0 is time
+                    colvar_dict[time] = cv_values
+                
+                # Number of CV columns
+                n_cv_cols = len(colvar_columns)
+                
+                # Create a new array with additional columns for CV values
+                model_devi_with_cv = np.zeros((model_devi_data.shape[0], model_devi_data.shape[1] + n_cv_cols))
+                model_devi_with_cv[:, :model_devi_data.shape[1]] = model_devi_data
+                
+                # For each frame in model_devi, find matching CV values
+                matched_frames = 0
+                for i in range(model_devi_data.shape[0]):
+                    frame_time = int(model_devi_data[i, 0])
+                    if frame_time in colvar_dict:
+                        model_devi_with_cv[i, model_devi_data.shape[1]:] = colvar_dict[frame_time]
+                        matched_frames += 1
+                
+                if matched_frames == 0:
+                    return False
+                
+                # Create a header that includes CV column information
+                cv_header = " ".join([f"CV_{col}" for col in colvar_columns])
+                
+                # Read the original model_devi header
+                with open(model_devi_file) as f:
+                    first_line = f.readline().strip()
+                
+                if first_line.startswith("#"):
+                    # Remove # and add CV column names
+                    header_content = first_line[1:].strip()
+                    header = f"# {header_content} {cv_header}"
+                else:
+                    header = f"# {cv_header}"
+                
+                # Write the enhanced model_devi file
+                formats = ["%12d"] + ["%22.6e"] * (model_devi_with_cv.shape[1] - 1)
+                np.savetxt(
+                    task_path / "model_devi.out",  # Directly update the original file
+                    model_devi_with_cv,
+                    fmt=formats,
+                    header=header,
+                    comments="",
+                )
+                
+                return True
+                
+            except Exception as e:
+                print(f"Error: {str(e)}")
+                return False
+        
+        # Call the function to update model_devi.out with CV values
+        result = update_model_devi_with_colvar(self.task_dir)
+        self.assertTrue(result)
+        
+        # Check if model_devi.out file was updated with CV values
+        updated_model_devi_file = self.task_dir / "model_devi.out"
+        self.assertTrue(updated_model_devi_file.exists())
+        
+        # Verify the content of updated model_devi.out
+        updated_model_devi_data = np.loadtxt(updated_model_devi_file)
+        
+        # Check dimensions: original columns + CV column
+        self.assertEqual(updated_model_devi_data.shape[1], model_devi_data.shape[1] + 1)
+        
+        # Check CV values were correctly added
+        for i in range(model_devi_data.shape[0]):
+            frame_time = int(model_devi_data[i, 0])
+            # Compare with the original COLVAR data
+            for j, row in enumerate(colvar_data):
+                if int(row[0]) == frame_time:
+                    # Check the CV value was correctly copied to the last column
+                    self.assertEqual(updated_model_devi_data[i, -1], row[1])
+        
+        # Test with multiple CV columns
+        # First restore the original model_devi.out
+        np.savetxt(model_devi_file, model_devi_data, fmt="%12d %22.6e %22.6e %22.6e %22.6e %22.6e %22.6e", 
+                  header="step v_diff v_diff_x v_diff_y v_diff_z f_max f_min", comments="#")
+        
+        # Create a new COLVAR file with multiple columns
+        colvar_data_multi = np.array([
+            [1, 0.5, 10.0, 20.0],   # frame 1: CV1=0.5, CV2=10.0, CV3=20.0
+            [2, 1.2, 11.0, 21.0],   # frame 2: CV1=1.2, CV2=11.0, CV3=21.0
+            [3, 0.8, 12.0, 22.0],   # frame 3: CV1=0.8, CV2=12.0, CV3=22.0
+            [4, 1.5, 13.0, 23.0],   # frame 4: CV1=1.5, CV2=13.0, CV3=23.0
+        ])
+        colvar_file = self.task_dir / "COLVAR"
+        np.savetxt(colvar_file, colvar_data_multi, fmt="%12d %22.6e %22.6e %22.6e", 
+                  header="#! FIELDS time cv1 cv2 cv3", comments="")
+        
+        # Test with two CV columns
+        result = update_model_devi_with_colvar(self.task_dir, colvar_columns=[0, 2])
+        self.assertTrue(result)
+        
+        # Check dimensions: original columns + 2 CV columns
+        updated_model_devi_data = np.loadtxt(updated_model_devi_file)
+        self.assertEqual(updated_model_devi_data.shape[1], model_devi_data.shape[1] + 2)
+        
+        # Check CV values were correctly added
+        for i in range(model_devi_data.shape[0]):
+            frame_time = int(model_devi_data[i, 0])
+            # Compare with the original COLVAR data
+            for j, row in enumerate(colvar_data_multi):
+                if int(row[0]) == frame_time:
+                    # Check CV1 value (column 1 in COLVAR, excluding time)
+                    self.assertEqual(updated_model_devi_data[i, -2], row[1])
+                    # Check CV3 value (column 3 in COLVAR, excluding time)
+                    self.assertEqual(updated_model_devi_data[i, -1], row[3])
+                    
+        # Provide a documented solution for users
+        solution_text = """
+        # How to include CV values from COLVAR in model_devi.out files
+        
+        To add CV values from PLUMED COLVAR files directly to model_devi.out for inspection in 02.fp,
+        add the following parameters to your input file:
+        
+        ```
+        "model_devi_plumed": true,
+        "model_devi_plumed_cv_columns": [0, 1]  # Include columns 0 and 1 from COLVAR (excluding time column)
+        ```
+        
+        This will automatically include the CV values in the model_devi.out files, making it easier
+        to check the selected configurations in the 02.fp stage.
+        
+        The resulting model_devi.out files will contain both model deviation data and the specified
+        CV values, with appropriate headers to identify each column.
+        """
+        
+        print(solution_text)
+
 if __name__ == "__main__":
     unittest.main() 

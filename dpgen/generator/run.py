@@ -2159,6 +2159,87 @@ def run_model_devi(iter_index, jdata, mdata):
     model_devi_engine = jdata.get("model_devi_engine", "lammps")
     if model_devi_engine != "calypso":
         run_md_model_devi(iter_index, jdata, mdata)
+        
+        # Add CV values to model_devi.out files if PLUMED was used and CV columns are specified
+        if jdata.get("model_devi_plumed", False) and "model_devi_plumed_cv_columns" in jdata:
+            iter_name = make_iter_name(iter_index)
+            work_path = os.path.join(iter_name, model_devi_name)
+            cv_columns = jdata.get("model_devi_plumed_cv_columns", 2)
+            tasks = glob.glob(os.path.join(work_path, "task.*"))
+            
+            for task in tasks:
+                # Check if COLVAR file exists
+                colvar_files = glob.glob(os.path.join(task, "COLVAR*"))
+                model_devi_file = os.path.join(task, "model_devi.out")
+                
+                if colvar_files and os.path.exists(model_devi_file):
+                    try:
+                        # Read model_devi.out file
+                        model_devi_data = np.loadtxt(model_devi_file)
+                        if model_devi_data.ndim == 1:  # Handle case with only one row
+                            model_devi_data = model_devi_data.reshape(1, -1)
+                        
+                        # Read COLVAR data
+                        colvar_data = _read_plumed_colvar_file(task, cv_columns)
+                        if colvar_data is None:
+                            continue
+                            
+                        # Make cv_columns a list if it's not already
+                        if not isinstance(cv_columns, list):
+                            cv_columns_list = [cv_columns]
+                        else:
+                            cv_columns_list = cv_columns
+                        
+                        # Create a dictionary mapping timesteps to CV values for fast lookup
+                        colvar_dict = {int(row[0]): row[1:] for row in colvar_data}
+                        
+                        # Number of CV columns (excluding time)
+                        n_cv_cols = colvar_data.shape[1] - 1
+                        
+                        # Create a new array with additional columns for CV values
+                        model_devi_with_cv = np.zeros((model_devi_data.shape[0], model_devi_data.shape[1] + n_cv_cols))
+                        model_devi_with_cv[:, :model_devi_data.shape[1]] = model_devi_data
+                        
+                        # For each frame in model_devi, find matching CV values
+                        matched_frames = 0
+                        for i in range(model_devi_data.shape[0]):
+                            frame_time = int(model_devi_data[i, 0])
+                            if frame_time in colvar_dict:
+                                model_devi_with_cv[i, model_devi_data.shape[1]:] = colvar_dict[frame_time]
+                                matched_frames += 1
+                        
+                        if matched_frames > 0:
+                            dlog.info(f"Added CV values to model_devi for {matched_frames} out of {model_devi_data.shape[0]} frames in {task}")
+                            
+                            # Create a header that includes CV column information
+                            cv_header = " ".join([f"CV_{col}" for col in cv_columns_list])
+                            
+                            # Read the original model_devi header
+                            try:
+                                with open(model_devi_file) as f:
+                                    first_line = f.readline().strip()
+                                
+                                if first_line.startswith("#"):
+                                    # Append CV column names to existing header
+                                    header_content = first_line[1:].strip()
+                                    header = f"# {header_content} {cv_header}"
+                                else:
+                                    header = f"# {cv_header}"
+                            except:
+                                header = f"# {cv_header}"
+                            
+                            # Write the enhanced model_devi file with CV values
+                            formats = ["%12d"] + ["%22.6e"] * (model_devi_with_cv.shape[1] - 1)
+                            np.savetxt(
+                                os.path.join(task, "model_devi.out"),  # overwrite original file
+                                model_devi_with_cv,
+                                fmt=formats,
+                                header=header,
+                                comments="",
+                            )
+                    except Exception as e:
+                        dlog.error(f"Error adding CV values to model_devi.out in {task}: {str(e)}")
+                        
     else:
         run_calypso_model_devi(iter_index, jdata, mdata)
 
@@ -2359,58 +2440,8 @@ def _read_plumed_colvar_file(
         dlog.warning(f"No COLVAR files found in {task_path}")
         return None
     
-    if len(colvar_files) > 1:
-        # Similar to model_devi files, handle multiple COLVAR files from PIMD
-        colvar_files_sorted = sorted(
-            colvar_files,
-            key=lambda x: int(re.search(r"COLVAR\.(\d+)", x).group(1)) if re.search(r"COLVAR\.(\d+)", x) else 0,
-        )
-        
-        # Read the first file to get headers
-        with open(colvar_files_sorted[0]) as f:
-            first_line = f.readline().strip()
-            
-        if not first_line.startswith("#"):
-            first_line = "#"
-            
-        num_beads = len(colvar_files_sorted)
-        colvar_contents = []
-        
-        for file in colvar_files_sorted:
-            # Skip comment lines that start with #
-            data = np.loadtxt(file, comments="#")
-            if data.ndim == 1:  # Handle case with only one row
-                data = data.reshape(1, -1)
-            colvar_contents.append(data)
-            
-        # Check all files have same number of lines
-        assert all(
-            content.shape[0] == colvar_contents[0].shape[0]
-            for content in colvar_contents
-        ), "Not all beads generated the same number of lines in COLVAR files"
-        
-        # Process timestepping similar to model_devi files
-        last_step = colvar_contents[0][-1, 0]
-        for ibead in range(1, num_beads):
-            colvar_contents[ibead][:, 0] = colvar_contents[ibead][:, 0] + ibead * (last_step + 1)
-            
-        colvar_data = np.concatenate(colvar_contents, axis=0)
-        
-        # Write combined COLVAR file
-        num_columns = colvar_data.shape[1]
-        formats = ["%12d"] + ["%22.6e"] * (num_columns - 1)
-        np.savetxt(
-            os.path.join(task_path, "COLVAR.combined"),
-            colvar_data,
-            fmt=formats,
-            header=first_line.rstrip(),
-            comments="",
-        )
-        
-        # Use the combined file for analysis
-        colvar_file = os.path.join(task_path, "COLVAR.combined")
-    else:
-        colvar_file = colvar_files[0]
+    # Use the first (and typically only) COLVAR file for standard MD
+    colvar_file = colvar_files[0]
     
     # Load COLVAR data - handle comment lines that start with #
     try:

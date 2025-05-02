@@ -369,6 +369,7 @@ The union of the two sets is made as candidate dataset."
     doc_model_devi_nopbc = "Assume open boundary condition in MD simulations."
     doc_model_devi_plumed = ""  # looking forward to update
     doc_model_devi_plumed_path = ""  # looking forward to update
+    doc_model_devi_plumed_cv_columns = "Column indices in the PLUMED COLVAR file to include in model_devi.out (0-based, excluding time column). Can be a single number or a list of column indices."
     doc_shuffle_poscar = "Shuffle atoms of each frame before running simulations. The purpose is to sample the element occupation of alloys."
     doc_use_relative = "Calculate relative force model deviation."
     doc_epsilon = (
@@ -506,6 +507,13 @@ The union of the two sets is made as candidate dataset."
             str,
             optional=True,
             doc=doc_model_devi_plumed_path,
+        ),
+        Argument(
+            "model_devi_plumed_cv_columns",
+            [int, list],
+            optional=True,
+            default=2,
+            doc=doc_model_devi_plumed_cv_columns,
         ),
         Argument(
             "shuffle_poscar", bool, optional=True, doc=doc_shuffle_poscar

@@ -99,10 +99,10 @@ class TestPlumedColvar(unittest.TestCase):
         )
         
         # Check selection results
-        # Frames with cv2 within [5, 10) and force/virial within thresholds: 1, 5, 7, 10
-        self.assertEqual(len(fp_candidate), 3)
+        # Frames with cv2 within [5, 10) and force/virial within thresholds: 1, 3, 5, 7, 10
+        self.assertEqual(len(fp_candidate), 4)
         candidate_frames = sorted([x[1] for x in fp_candidate])
-        self.assertEqual(candidate_frames, [1, 7, 10])
+        self.assertEqual(candidate_frames, [1, 5, 7, 10])
         
         # Check that uniform_candidates contains CV values for all candidates
         self.assertEqual(len(uniform_candidates), len(fp_candidate))
@@ -116,7 +116,7 @@ class TestPlumedColvar(unittest.TestCase):
         self.assertEqual(fp_rest_accurate[0][1], 3)  # Frame 3
         
         # Check counter
-        self.assertEqual(counter["candidate"], 3)
+        self.assertEqual(counter["candidate"], 4)
         self.assertEqual(counter["accurate"], 1)
 
     def test_select_by_plumed_colvar_multiple_columns(self):
@@ -139,7 +139,7 @@ class TestPlumedColvar(unittest.TestCase):
         )
         
         # Check selection results
-        self.assertEqual(len(fp_candidate), 4)
+        self.assertEqual(len(fp_candidate), 3)
         candidate_frames = sorted([x[1] for x in fp_candidate])
         self.assertEqual(candidate_frames, [1, 7, 10])
         
@@ -155,7 +155,7 @@ class TestPlumedColvar(unittest.TestCase):
         self.assertEqual(fp_rest_accurate[0][1], 3)  # Frame 3
         
         # Check counter
-        self.assertEqual(counter["candidate"], 4)
+        self.assertEqual(counter["candidate"], 3)
         self.assertEqual(counter["accurate"], 1)
 
     def test_select_by_plumed_colvar_multi_range(self):

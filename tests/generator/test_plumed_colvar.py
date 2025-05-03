@@ -5,7 +5,6 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
-
 from dpgen.generator.run import (
     _read_plumed_colvar_file,
     _select_by_plumed_colvar,
@@ -82,7 +81,7 @@ class TestPlumedColvar(unittest.TestCase):
         
     def test_select_by_plumed_colvar_single_column(self):
         # Test selection with both model deviation and a single colvar criterion
-        fp_rest_accurate, fp_candidate, fp_rest_failed, counter = _select_by_plumed_colvar(
+        fp_rest_accurate, fp_candidate, fp_rest_failed, counter, uniform_candidates = _select_by_plumed_colvar(
             [str(self.task_dir)],  # modd_system_task
             0.01,  # f_trust_lo
             0.08,  # f_trust_hi
@@ -100,26 +99,29 @@ class TestPlumedColvar(unittest.TestCase):
         )
         
         # Check selection results
-        # Frames with cv2 within [5, 10): 1, 3, 5, 7, 10
-        # Frames with forces within thresholds: 1, 3, 4, 5, 6, 7, 8, 9, 10
-        # Frames with forces too high: 2
-        
-        # Check candidate frames - force OK and CV in range
-        self.assertEqual(len(fp_candidate), 5)
+        # Frames with cv2 within [5, 10) and force/virial within thresholds: 1, 5, 7, 10
+        self.assertEqual(len(fp_candidate), 3)
         candidate_frames = sorted([x[1] for x in fp_candidate])
-        self.assertEqual(candidate_frames, [1, 5, 7, 10])
+        self.assertEqual(candidate_frames, [1, 7, 10])
+        
+        # Check that uniform_candidates contains CV values for all candidates
+        self.assertEqual(len(uniform_candidates), len(fp_candidate))
+        for candidate in fp_candidate:
+            key = (candidate[0], candidate[1])
+            self.assertIn(key, uniform_candidates)
+            self.assertEqual(len(uniform_candidates[key]), 1)  # Should have one CV value
         
         # Check accurate frames - force below threshold and CV in range
         self.assertEqual(len(fp_rest_accurate), 1)
         self.assertEqual(fp_rest_accurate[0][1], 3)  # Frame 3
         
         # Check counter
-        self.assertEqual(counter["candidate"], 5)
+        self.assertEqual(counter["candidate"], 3)
         self.assertEqual(counter["accurate"], 1)
 
     def test_select_by_plumed_colvar_multiple_columns(self):
         # Test selection with both model deviation and multiple colvar criteria
-        fp_rest_accurate, fp_candidate, fp_rest_failed, counter = _select_by_plumed_colvar(
+        fp_rest_accurate, fp_candidate, fp_rest_failed, counter, uniform_candidates = _select_by_plumed_colvar(
             [str(self.task_dir)],  # modd_system_task
             0.01,  # f_trust_lo
             0.08,  # f_trust_hi
@@ -136,10 +138,17 @@ class TestPlumedColvar(unittest.TestCase):
             True,  # detailed_report_make_fp
         )
         
-        # Check selection results - force OK and both CVs in range
+        # Check selection results
         self.assertEqual(len(fp_candidate), 4)
         candidate_frames = sorted([x[1] for x in fp_candidate])
         self.assertEqual(candidate_frames, [1, 7, 10])
+        
+        # Check that uniform_candidates contains CV values for all candidates
+        self.assertEqual(len(uniform_candidates), len(fp_candidate))
+        for candidate in fp_candidate:
+            key = (candidate[0], candidate[1])
+            self.assertIn(key, uniform_candidates)
+            self.assertEqual(len(uniform_candidates[key]), 2)  # Should have two CV values
         
         # Check accurate frames - force below threshold and both CVs in range
         self.assertEqual(len(fp_rest_accurate), 1)
@@ -151,7 +160,7 @@ class TestPlumedColvar(unittest.TestCase):
 
     def test_select_by_plumed_colvar_multi_range(self):
         # Test selection with multi-range CV criteria
-        fp_rest_accurate, fp_candidate, fp_rest_failed, counter = _select_by_plumed_colvar(
+        fp_rest_accurate, fp_candidate, fp_rest_failed, counter, uniform_candidates = _select_by_plumed_colvar(
             [str(self.task_dir)],  # modd_system_task
             0.01,  # f_trust_lo
             0.08,  # f_trust_hi
@@ -173,10 +182,17 @@ class TestPlumedColvar(unittest.TestCase):
         self.assertEqual(len(fp_candidate), 4)
         candidate_frames = sorted([x[1] for x in fp_candidate])
         self.assertEqual(candidate_frames, [6, 7, 9, 10])
+        
+        # Check that uniform_candidates contains CV values for all candidates
+        self.assertEqual(len(uniform_candidates), len(fp_candidate))
+        for candidate in fp_candidate:
+            key = (candidate[0], candidate[1])
+            self.assertIn(key, uniform_candidates)
+            self.assertEqual(len(uniform_candidates[key]), 2)  # Should have two CV values
 
     def test_select_by_plumed_colvar_uniform(self):
         # Test uniform selection across CV range
-        fp_rest_accurate, fp_candidate, fp_rest_failed, counter = _select_by_plumed_colvar(
+        fp_rest_accurate, fp_candidate, fp_rest_failed, counter, uniform_candidates = _select_by_plumed_colvar(
             [str(self.task_dir)],  # modd_system_task
             0.01,  # f_trust_lo
             0.08,  # f_trust_hi
@@ -198,6 +214,13 @@ class TestPlumedColvar(unittest.TestCase):
         # So the above just produces all candidates with CV values
         # Check that candidate frames are returned
         self.assertGreater(len(fp_candidate), 0)
+        
+        # Check that uniform_candidates contains CV values for all candidates
+        self.assertEqual(len(uniform_candidates), len(fp_candidate))
+        for candidate in fp_candidate:
+            key = (candidate[0], candidate[1])
+            self.assertIn(key, uniform_candidates)
+            self.assertEqual(len(uniform_candidates[key]), 1)  # Should have one CV value
         
         # Check counter - should reflect all candidates
         self.assertEqual(counter["candidate"], len(fp_candidate))

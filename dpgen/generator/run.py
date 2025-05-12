@@ -2165,6 +2165,11 @@ def run_model_devi(iter_index, jdata, mdata):
             iter_name = make_iter_name(iter_index)
             work_path = os.path.join(iter_name, model_devi_name)
             cv_columns = jdata.get("model_devi_plumed_cv_columns", 2)
+            
+            # Standardize cv_columns to list immediately
+            if not isinstance(cv_columns, list):
+                cv_columns = [cv_columns]
+                
             tasks = glob.glob(os.path.join(work_path, "task.*"))
             
             for task in tasks:
@@ -2183,13 +2188,7 @@ def run_model_devi(iter_index, jdata, mdata):
                         colvar_data = _read_plumed_colvar_file(task, cv_columns)
                         if colvar_data is None:
                             continue
-                            
-                        # Make cv_columns a list if it's not already
-                        if not isinstance(cv_columns, list):
-                            cv_columns_list = [cv_columns]
-                        else:
-                            cv_columns_list = cv_columns
-                        
+                                                    
                         # Create a dictionary mapping timesteps to CV values for fast lookup
                         colvar_dict = {int(row[0]): row[1:] for row in colvar_data}
                         
@@ -2202,30 +2201,37 @@ def run_model_devi(iter_index, jdata, mdata):
                         
                         # For each frame in model_devi, find matching CV values
                         matched_frames = 0
+                        unmatched_frames = 0
                         for i in range(model_devi_data.shape[0]):
                             frame_time = int(model_devi_data[i, 0])
                             if frame_time in colvar_dict:
                                 model_devi_with_cv[i, model_devi_data.shape[1]:] = colvar_dict[frame_time]
                                 matched_frames += 1
+                            else:
+                                unmatched_frames += 1
                         
                         if matched_frames > 0:
                             dlog.info(f"Added CV values to model_devi for {matched_frames} out of {model_devi_data.shape[0]} frames in {task}")
+                            if unmatched_frames > 0:
+                                dlog.warning(f"Could not match {unmatched_frames} frames between model_devi.out and COLVAR in {task}")
                             
                             # Create a header that includes CV column information
-                            cv_header = " ".join([f"CV_{col}" for col in cv_columns_list])
+                            cv_header = " ".join([f"CV_{col}" for col in cv_columns])
                             
-                            # Read the original model_devi header
+                            # Read the original model_devi header more robustly
+                            header = None
                             try:
-                                with open(model_devi_file) as f:
-                                    first_line = f.readline().strip()
-                                
-                                if first_line.startswith("#"):
-                                    # Append CV column names to existing header
-                                    header_content = first_line[1:].strip()
-                                    header = f"# {header_content} {cv_header}"
-                                else:
-                                    header = f"# {cv_header}"
-                            except:
+                                with open(model_devi_file, 'r') as f:
+                                    lines = f.readlines()
+                                    if lines and lines[0].startswith('#'):
+                                        # Strip # and any whitespace
+                                        header_content = lines[0][1:].strip()
+                                        header = f"# {header_content} {cv_header}"
+                            except Exception as e:
+                                dlog.warning(f"Error reading header from model_devi.out in {task}: {str(e)}")
+                            
+                            # If we couldn't get the header, create a new one
+                            if header is None:
                                 header = f"# {cv_header}"
                             
                             # Write the enhanced model_devi file with CV values

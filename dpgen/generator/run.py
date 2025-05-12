@@ -2551,12 +2551,19 @@ def _select_by_plumed_colvar(
     if not isinstance(colvar_columns, list):
         colvar_columns = [colvar_columns]
     
-    # Convert single values to lists
+    # Convert single values to lists for colvar_lo
     if not isinstance(colvar_lo, list):
         colvar_lo = [colvar_lo] * len(colvar_columns)
+    elif len(colvar_lo) == 0:
+        dlog.error("Empty colvar_lo provided")
+        raise ValueError("Empty colvar_lo provided")
     
+    # Convert single values to lists for colvar_hi
     if not isinstance(colvar_hi, list):
         colvar_hi = [colvar_hi] * len(colvar_columns)
+    elif len(colvar_hi) == 0:
+        dlog.error("Empty colvar_hi provided")
+        raise ValueError("Empty colvar_hi provided")
     
     # Check if we're using multi-range intervals (if the first element is a list)
     using_multi_range = False
@@ -2564,17 +2571,28 @@ def _select_by_plumed_colvar(
         using_multi_range = True
         # Ensure each column has at least one range
         if len(colvar_lo) != len(colvar_columns):
-            dlog.error("For multi-range selection, each column must have its ranges defined")
+            dlog.error(f"For multi-range selection, each column must have its ranges defined. colvar_lo length: {len(colvar_lo)}, columns: {len(colvar_columns)}")
             raise ValueError("For multi-range selection, each column must have its ranges defined")
         
         # Check consistency of range lists
-        for ranges_lo, ranges_hi in zip(colvar_lo, colvar_hi):
+        for i, (ranges_lo, ranges_hi) in enumerate(zip(colvar_lo, colvar_hi)):
             if not isinstance(ranges_hi, list) or len(ranges_lo) != len(ranges_hi):
-                dlog.error("Inconsistent range definitions in colvar_lo and colvar_hi")
+                dlog.error(f"Inconsistent range definitions in colvar_lo and colvar_hi for column {i}. Lo: {ranges_lo}, Hi: {ranges_hi}")
                 raise ValueError("Inconsistent range definitions in colvar_lo and colvar_hi")
     elif len(colvar_lo) != len(colvar_columns) or len(colvar_hi) != len(colvar_columns):
-        dlog.error("Length mismatch between colvar_columns, colvar_lo, and colvar_hi")
+        dlog.error(f"Length mismatch between colvar_columns ({len(colvar_columns)}), colvar_lo ({len(colvar_lo)}), and colvar_hi ({len(colvar_hi)})")
         raise ValueError("Length mismatch between colvar_columns, colvar_lo, and colvar_hi")
+    
+    # Log the range configuration for easier debugging
+    if using_multi_range:
+        dlog.info(f"Using multi-range CV selection with {len(colvar_columns)} columns")
+        for i, col in enumerate(colvar_columns):
+            ranges_str = ", ".join([f"[{lo}, {hi}]" for lo, hi in zip(colvar_lo[i], colvar_hi[i])])
+            dlog.info(f"  Column {col}: {ranges_str}")
+    else:
+        dlog.info(f"Using single-range CV selection with {len(colvar_columns)} columns")
+        for i, col in enumerate(colvar_columns):
+            dlog.info(f"  Column {col}: [{colvar_lo[i]}, {colvar_hi[i]}]")
         
     fp_candidate = []
     fp_rest_accurate = []
@@ -2615,143 +2633,131 @@ def _select_by_plumed_colvar(
             # The rest are the CV values corresponding to colvar_columns
             colvar_dict = {int(row[0]): row[1:] for row in colvar_data}
             
-            for ii in range(all_conf.shape[0]):
-                if all_conf[ii][0] < model_devi_skip:
+            for idx, row in enumerate(all_conf):
+                if idx < model_devi_skip:
+                    continue
+                step = int(row[0])
+                if step not in colvar_dict:
+                    dlog.debug(f"Step {step} not found in COLVAR data for {tt}, skipping")
                     continue
                     
-                cc = int(all_conf[ii][0])
+                cv_values = colvar_dict[step]
                 
-                # Check if we have colvar data for this timestep
-                if cc not in colvar_dict:
-                    dlog.debug(f"No COLVAR data for timestep {cc} in {tt}, skipping")
-                    continue
-                    
-                cv_values = colvar_dict[cc]
-                
-                if cluster_cutoff is None:
-                    if model_devi_engine == "calypso":
-                        if float(all_conf[ii][-1]) <= float(min_dis):
-                            if detailed_report_make_fp:
-                                fp_rest_failed.append([tt, cc])
-                            counter["failed"] += 1
-                            continue
-                    
-                    # Check CV criteria (for single ranges or multi-ranges)
-                    colvar_in_range = True
-                    
-                    if using_multi_range:
-                        # For multi-range: check if CV value is in any of the specified ranges
-                        for j, cv_value in enumerate(cv_values):
-                            cv_in_any_range = False
-                            for range_idx in range(len(colvar_lo[j])):
-                                lo = colvar_lo[j][range_idx]
-                                hi = colvar_hi[j][range_idx]
-                                if cv_value >= lo and cv_value < hi:
-                                    cv_in_any_range = True
+                # Check model deviation criteria first
+                f_max = row[4]
+                v_max = row[1]
+                if model_devi_engine == "calypso":
+                    dist = row[7]
+                    if v_max >= v_trust_lo and v_max < v_trust_hi and f_max >= f_trust_lo and f_max < f_trust_hi and dist >= min_dis:
+                        # Check CV criteria
+                        cv_match = False
+                        # For multi-range criteria
+                        if using_multi_range:
+                            # We need to check if ANY range matches
+                            for range_idx in range(len(colvar_lo[0])):
+                                all_columns_match = True
+                                for col_idx, col_val in enumerate(cv_values):
+                                    lo = colvar_lo[col_idx][range_idx]
+                                    hi = colvar_hi[col_idx][range_idx]
+                                    if not (col_val >= lo and col_val < hi):
+                                        all_columns_match = False
+                                        break
+                                if all_columns_match:
+                                    cv_match = True
                                     break
-                            if not cv_in_any_range:
-                                colvar_in_range = False
-                                break
-                    else:
-                        # For single ranges: check if CV value is within the specified range
-                        for j, cv_value in enumerate(cv_values):
-                            if cv_value < colvar_lo[j] or cv_value >= colvar_hi[j]:
-                                colvar_in_range = False
-                                break
-                    
-                    # Check both model deviation and colvar criteria
-                    force_in_range = all_conf[ii][4] < f_trust_hi and all_conf[ii][4] >= f_trust_lo
-                    virial_in_range = all_conf[ii][1] < v_trust_hi and all_conf[ii][1] >= v_trust_lo
-                    
-                    # If both model deviation and colvar criteria are met, potentially add to candidates
-                    if (force_in_range or virial_in_range) and colvar_in_range:
-                        # Store the CV values regardless of uniform selection mode
-                        # This allows post-processing for uniform selection after this function
-                        uniform_candidates[(tt, cc)] = cv_values
-                        fp_candidate.append([tt, cc])
-                        counter["candidate"] += 1
-                    # If model deviation is too high or colvar is out of range, add to failed
-                    elif (all_conf[ii][1] >= v_trust_hi) or (all_conf[ii][4] >= f_trust_hi) or not colvar_in_range:
-                        if detailed_report_make_fp:
-                            fp_rest_failed.append([tt, cc])
-                        counter["failed"] += 1
-                    # If both model deviation and colvar are good (below lower thresholds), add to accurate
-                    elif all_conf[ii][1] < v_trust_lo and all_conf[ii][4] < f_trust_lo and colvar_in_range:
-                        if detailed_report_make_fp:
-                            fp_rest_accurate.append([tt, cc])
-                        counter["accurate"] += 1
-                    else:
-                        if model_devi_engine == "calypso":
-                            dlog.info(
-                                "ase opt traj %s frame %d with f devi %f and cv values %s does not belong to either accurate, candidate and failed"
-                                % (tt, ii, all_conf[ii][4], str(cv_values))
-                            )
                         else:
-                            dlog.warning(
-                                "md traj %s frame %d with f devi %f and cv values %s does not belong to either accurate, candidate and failed"
-                                % (tt, ii, all_conf[ii][4], str(cv_values))
-                            )
-                else:
-                    # Handle cluster cases
-                    # Check CV criteria (for single ranges or multi-ranges)
-                    colvar_in_range = True
-                    
-                    if using_multi_range:
-                        # For multi-range: check if CV value is in any of the specified ranges
-                        for j, cv_value in enumerate(cv_values):
-                            cv_in_any_range = False
-                            for range_idx in range(len(colvar_lo[j])):
-                                lo = colvar_lo[j][range_idx]
-                                hi = colvar_hi[j][range_idx]
-                                if cv_value >= lo and cv_value < hi:
-                                    cv_in_any_range = True
+                            # Single range - ALL columns must match their respective ranges
+                            all_columns_match = True
+                            for col_idx, col_val in enumerate(cv_values):
+                                if not (col_val >= colvar_lo[col_idx] and col_val < colvar_hi[col_idx]):
+                                    all_columns_match = False
                                     break
-                            if not cv_in_any_range:
-                                colvar_in_range = False
-                                break
-                    else:
-                        # For single ranges: check if CV value is within the specified range
-                        for j, cv_value in enumerate(cv_values):
-                            if cv_value < colvar_lo[j] or cv_value >= colvar_hi[j]:
-                                colvar_in_range = False
-                                break
+                            cv_match = all_columns_match
                             
-                    # Skip clusters with CV values outside range
-                    if not colvar_in_range:
-                        continue
-                        
-                    idx_candidate = np.where(
-                        np.logical_and(
-                            all_conf[ii][7:] < f_trust_hi,
-                            all_conf[ii][7:] >= f_trust_lo,
-                        )
-                    )[0]
-                    
-                    if uniform_selection:
-                        # Store candidates for later uniform selection
-                        for jj in idx_candidate:
-                            uniform_candidates[(tt, cc, jj)] = cv_values
+                        if cv_match:
+                            fp_candidate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
+                            counter["candidate"] += 1
+                            # Store CV values for uniform selection
+                            if uniform_selection:
+                                uniform_candidates[os.path.join(tt, "traj", f"{step:d}.lammpstrj")] = cv_values
+                    elif f_max >= f_trust_hi or v_max >= v_trust_hi:
+                        fp_rest_failed.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
+                        counter["failed"] += 1
                     else:
-                        for jj in idx_candidate:
-                            fp_candidate.append([tt, cc, jj])
-                        counter["candidate"] += len(idx_candidate)
-                    
-                    idx_rest_accurate = np.where(all_conf[ii][7:] < f_trust_lo)[0]
-                    if detailed_report_make_fp:
-                        for jj in idx_rest_accurate:
-                            fp_rest_accurate.append([tt, cc, jj])
-                    counter["accurate"] += len(idx_rest_accurate)
-                    
-                    idx_rest_failed = np.where(all_conf[ii][7:] >= f_trust_hi)[0]
-                    if detailed_report_make_fp:
-                        for jj in idx_rest_failed:
-                            fp_rest_failed.append([tt, cc, jj])
-                    counter["failed"] += len(idx_rest_failed)
-
-    # We no longer apply uniform selection here - we return the candidates and their CV values
-    # for later processing
-
-    return fp_rest_accurate, fp_candidate, fp_rest_failed, counter, uniform_candidates
+                        fp_rest_accurate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
+                        counter["accurate"] += 1
+                # For non-calypso engines
+                else:
+                    if v_max >= v_trust_lo and v_max < v_trust_hi and f_max >= f_trust_lo and f_max < f_trust_hi:
+                        # Check CV criteria
+                        cv_match = False
+                        # For multi-range criteria
+                        if using_multi_range:
+                            # We need to check if ANY range matches
+                            for range_idx in range(len(colvar_lo[0])):
+                                all_columns_match = True
+                                for col_idx, col_val in enumerate(cv_values):
+                                    lo = colvar_lo[col_idx][range_idx]
+                                    hi = colvar_hi[col_idx][range_idx]
+                                    if not (col_val >= lo and col_val < hi):
+                                        all_columns_match = False
+                                        break
+                                if all_columns_match:
+                                    cv_match = True
+                                    dlog.debug(f"Step {step} matched CV range {range_idx}: {cv_values}")
+                                    break
+                        else:
+                            # Single range - ALL columns must match their respective ranges
+                            all_columns_match = True
+                            for col_idx, col_val in enumerate(cv_values):
+                                if not (col_val >= colvar_lo[col_idx] and col_val < colvar_hi[col_idx]):
+                                    all_columns_match = False
+                                    break
+                            cv_match = all_columns_match
+                            if cv_match:
+                                dlog.debug(f"Step {step} matched CV range: {cv_values}")
+                            
+                        if cv_match:
+                            if model_devi_merge_traj:
+                                fp_candidate.append(os.path.join(tt, "all.lammpstrj/{}".format(step)))
+                            else:
+                                fp_candidate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
+                            counter["candidate"] += 1
+                            # Store CV values for uniform selection
+                            if uniform_selection:
+                                if model_devi_merge_traj:
+                                    uniform_candidates[os.path.join(tt, "all.lammpstrj/{}".format(step))] = cv_values
+                                else:
+                                    uniform_candidates[os.path.join(tt, "traj", f"{step:d}.lammpstrj")] = cv_values
+                    elif f_max >= f_trust_hi or v_max >= v_trust_hi:
+                        if model_devi_merge_traj:
+                            fp_rest_failed.append(os.path.join(tt, "all.lammpstrj/{}".format(step)))
+                        else:
+                            fp_rest_failed.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
+                        counter["failed"] += 1
+                    else:
+                        if model_devi_merge_traj:
+                            fp_rest_accurate.append(os.path.join(tt, "all.lammpstrj/{}".format(step)))
+                        else:
+                            fp_rest_accurate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
+                        counter["accurate"] += 1
+    
+    dlog.info(f"PLUMED CV selection results: {counter['candidate']} candidates, {counter['failed']} failed, {counter['accurate']} accurate.")
+    
+    # For detailed reports
+    if detailed_report_make_fp:
+        report_t = {"failed": (counter["failed"], fp_rest_failed), 
+                  "accurate": (counter["accurate"], fp_rest_accurate),
+                  "candidate": (counter["candidate"], fp_candidate)}
+        level_count = {}
+        for key1, all_conf in report_t.items():
+            all_conf_count = all_conf[0]
+            if all_conf_count > 0:
+                count_percent = float(all_conf_count) / float(all_conf_count) * 100.0
+                level_count[key1] = '%.2f %% (%d)' % (count_percent, all_conf_count)
+        dlog.info(f"PLUMED CV level count: {level_count}")
+    
+    return fp_rest_accurate, fp_candidate, fp_rest_failed, cc, uniform_candidates
 
 
 def _select_by_model_devi_standard(

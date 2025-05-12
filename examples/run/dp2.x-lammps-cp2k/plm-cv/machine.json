@@ -4,12 +4,12 @@
             "batch_type": "slurm",
             "context_type": "SSHContext",
             "local_root": "./",
-            "remote_root": "/home/gengzi/testfiles/DP/dpgen/NRR/NNH/tmp/train",
+            "remote_root": "/home/pengchao/testfiles/DP/dpgen/NRR/NNH/tmp/train",
             "remote_profile": {
                 "hostname": "xx.xx.xx.xx",
                 "password": "xxx",
                 "port": 22,
-                "username": "gengzi"
+                "username": "pengchao"
             }
         },
         "resources": {
@@ -21,19 +21,19 @@
             "source_list": ["activate dpmdkit_v2.1.5_0202"],
             "time_limit": "501:00:00"
         },
-        "command": "/opt/gengzi/pub/toolkits/conda/envs/dpmdkit_v2.1.5_0202/bin/dp"
+        "command": "/opt/pengchao/pub/toolkits/conda/envs/dpmdkit_v2.1.5_0202/bin/dp"
     },
     "model_devi": {
         "machine": {
             "batch_type": "slurm",
             "context_type": "SSHContext",
             "local_root": "./",
-            "remote_root": "/home/gengzi/testfiles/DP/dpgen/NRR/NNH/tmp/model_devi",
+            "remote_root": "/home/pengchao/testfiles/DP/dpgen/NRR/NNH/tmp/model_devi",
             "remote_profile": {
                 "hostname": "xx.xx.xx.xx",
                 "password": "xxx",
                 "port": 22,
-                "username": "gengzi"
+                "username": "pengchao"
             }
         },
         "resources": {
@@ -45,7 +45,7 @@
             "source_list": ["activate dpmdkit_v2.1.5_0202"],
             "time_limit": "502:00:00"
         },
-        "command": "/opt/gengzi/pub/toolkits/conda/envs/dpmdkit_v2.1.5_0202/bin/lmp"
+        "command": "/opt/pengchao/pub/toolkits/conda/envs/dpmdkit_v2.1.5_0202/bin/lmp"
     },
     "fp": {
         "machine": {

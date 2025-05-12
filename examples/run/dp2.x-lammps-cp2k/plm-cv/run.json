@@ -15,7 +15,7 @@
   ],
 
   "init_multi_systems": true,
-  "init_data_prefix": "/home/gengzi/testfiles/DP/dpgen/NRR/NNH/dataset/",
+  "init_data_prefix": "/home/pengchao/testfiles/DP/dpgen/NRR/NNH/dataset/",
   "init_data_sys":   [
     "init_PBED3",
     "accrun01"
@@ -25,7 +25,7 @@
     "auto"
   ], 
 
-  "sys_configs_prefix": "/home/gengzi/testfiles/DP/dpgen/NRR/NNH/bf20241104-NNH/structure/53153/before/16/iter00",
+  "sys_configs_prefix": "/home/pengchao/testfiles/DP/dpgen/NRR/NNH/bf20241104-NNH/structure/53153/before/16/iter00",
   "sys_configs": [
     ["task.012.000000/POSCAR"],
     ["task.013.000000/POSCAR"],

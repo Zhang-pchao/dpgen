@@ -2158,94 +2158,7 @@ def run_md_model_devi(iter_index, jdata, mdata):
 def run_model_devi(iter_index, jdata, mdata):
     model_devi_engine = jdata.get("model_devi_engine", "lammps")
     if model_devi_engine != "calypso":
-        run_md_model_devi(iter_index, jdata, mdata)
-        
-        # Add CV values to model_devi.out files if PLUMED was used and CV columns are specified
-        if jdata.get("model_devi_plumed", False) and "model_devi_plumed_cv_columns" in jdata:
-            iter_name = make_iter_name(iter_index)
-            work_path = os.path.join(iter_name, model_devi_name)
-            cv_columns = jdata.get("model_devi_plumed_cv_columns", 2)
-            
-            # Standardize cv_columns to list immediately
-            if not isinstance(cv_columns, list):
-                cv_columns = [cv_columns]
-                
-            tasks = glob.glob(os.path.join(work_path, "task.*"))
-            
-            for task in tasks:
-                # Check if COLVAR file exists
-                colvar_files = glob.glob(os.path.join(task, "COLVAR*"))
-                model_devi_file = os.path.join(task, "model_devi.out")
-                
-                if colvar_files and os.path.exists(model_devi_file):
-                    try:
-                        # Read model_devi.out file
-                        model_devi_data = np.loadtxt(model_devi_file)
-                        if model_devi_data.ndim == 1:  # Handle case with only one row
-                            model_devi_data = model_devi_data.reshape(1, -1)
-                        
-                        # Read COLVAR data
-                        colvar_data = _read_plumed_colvar_file(task, cv_columns)
-                        if colvar_data is None:
-                            continue
-                                                    
-                        # Create a dictionary mapping timesteps to CV values for fast lookup
-                        colvar_dict = {int(row[0]): row[1:] for row in colvar_data}
-                        
-                        # Number of CV columns (excluding time)
-                        n_cv_cols = colvar_data.shape[1] - 1
-                        
-                        # Create a new array with additional columns for CV values
-                        model_devi_with_cv = np.zeros((model_devi_data.shape[0], model_devi_data.shape[1] + n_cv_cols))
-                        model_devi_with_cv[:, :model_devi_data.shape[1]] = model_devi_data
-                        
-                        # For each frame in model_devi, find matching CV values
-                        matched_frames = 0
-                        unmatched_frames = 0
-                        for i in range(model_devi_data.shape[0]):
-                            frame_time = int(model_devi_data[i, 0])
-                            if frame_time in colvar_dict:
-                                model_devi_with_cv[i, model_devi_data.shape[1]:] = colvar_dict[frame_time]
-                                matched_frames += 1
-                            else:
-                                unmatched_frames += 1
-                        
-                        if matched_frames > 0:
-                            dlog.info(f"Added CV values to model_devi for {matched_frames} out of {model_devi_data.shape[0]} frames in {task}")
-                            if unmatched_frames > 0:
-                                dlog.warning(f"Could not match {unmatched_frames} frames between model_devi.out and COLVAR in {task}")
-                            
-                            # Create a header that includes CV column information
-                            cv_header = " ".join([f"CV_{col}" for col in cv_columns])
-                            
-                            # Read the original model_devi header more robustly
-                            header = None
-                            try:
-                                with open(model_devi_file, 'r') as f:
-                                    lines = f.readlines()
-                                    if lines and lines[0].startswith('#'):
-                                        # Strip # and any whitespace
-                                        header_content = lines[0][1:].strip()
-                                        header = f"# {header_content} {cv_header}"
-                            except Exception as e:
-                                dlog.warning(f"Error reading header from model_devi.out in {task}: {str(e)}")
-                            
-                            # If we couldn't get the header, create a new one
-                            if header is None:
-                                header = f"# {cv_header}"
-                            
-                            # Write the enhanced model_devi file with CV values
-                            formats = ["%12d"] + ["%22.6e"] * (model_devi_with_cv.shape[1] - 1)
-                            np.savetxt(
-                                os.path.join(task, "model_devi.out"),  # overwrite original file
-                                model_devi_with_cv,
-                                fmt=formats,
-                                header=header,
-                                comments="",
-                            )
-                    except Exception as e:
-                        dlog.error(f"Error adding CV values to model_devi.out in {task}: {str(e)}")
-                        
+        run_md_model_devi(iter_index, jdata, mdata)  
     else:
         run_calypso_model_devi(iter_index, jdata, mdata)
 
@@ -2490,6 +2403,7 @@ def _select_by_plumed_colvar(
     model_devi_merge_traj: bool = False,
     detailed_report_make_fp: bool = True,
     uniform_selection: bool = False,
+    model_devi_candidates: list = None,
 ):
     """Select configurations based on both model deviation and PLUMED COLVAR values.
     
@@ -2533,6 +2447,8 @@ def _select_by_plumed_colvar(
     uniform_selection : bool
         Whether to select frames uniformly across the CV ranges
         The max number of frames selected is controlled by fp_task_max in the outer scope
+    model_devi_candidates : list, optional
+        If provided, only filter these specific frames that already passed model_devi filtering
         
     Returns
     -------
@@ -2609,31 +2525,31 @@ def _select_by_plumed_colvar(
     for tt in modd_system_task:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # First get model deviation data
-            all_conf = _read_model_devi_file(
+            # Read model deviation data
+            model_devi = _read_model_devi_file(
                 tt, model_devi_f_avg_relative, model_devi_merge_traj
             )
             
-            # Then get COLVAR data
+            # Read COLVAR data separately
             colvar_data = _read_plumed_colvar_file(tt, colvar_columns)
             
             # Check if we got valid data
-            if colvar_data is None or all_conf is None:
+            if colvar_data is None or model_devi is None:
                 dlog.warning(f"Missing model deviation or COLVAR data for {tt}, skipping")
                 continue
                 
             # Handle single-row data
-            if all_conf.shape == (7,):
-                all_conf = all_conf.reshape(1, all_conf.shape[0])
-            elif model_devi_engine == "calypso" and all_conf.shape == (8,):
-                all_conf = all_conf.reshape(1, all_conf.shape[0])
+            if model_devi.shape == (7,):
+                model_devi = model_devi.reshape(1, model_devi.shape[0])
+            elif model_devi_engine == "calypso" and model_devi.shape == (8,):
+                model_devi = model_devi.reshape(1, model_devi.shape[0])
                 
             # Create a dictionary mapping timesteps to CV values for fast lookup
             # The first column (index 0) of colvar_data is the time
             # The rest are the CV values corresponding to colvar_columns
             colvar_dict = {int(row[0]): row[1:] for row in colvar_data}
             
-            for idx, row in enumerate(all_conf):
+            for idx, row in enumerate(model_devi):
                 if idx < model_devi_skip:
                     continue
                 step = int(row[0])
@@ -2644,8 +2560,9 @@ def _select_by_plumed_colvar(
                 cv_values = colvar_dict[step]
                 
                 # Check model deviation criteria first
-                f_max = row[4]
-                v_max = row[1]
+                f_max = row[4]  # Maximum force deviation
+                v_max = row[1]  # Maximum virial deviation
+                
                 if model_devi_engine == "calypso":
                     dist = row[7]
                     if v_max >= v_trust_lo and v_max < v_trust_hi and f_max >= f_trust_lo and f_max < f_trust_hi and dist >= min_dis:
@@ -3094,7 +3011,51 @@ def _make_fp_vasp_inner(
 
             # assumed e -> v
             if model_devi_use_plumed_colvar:
-                # Use PLUMED COLVAR for selection
+                # First apply model_devi filtering and show results
+                (
+                    fp_rest_accurate,
+                    fp_candidate_md,
+                    fp_rest_failed,
+                    counter_md,
+                ) = _select_by_model_devi_standard(
+                    modd_system_task,
+                    f_trust_lo_sys,
+                    f_trust_hi_sys,
+                    v_trust_lo_sys,
+                    v_trust_hi_sys,
+                    cluster_cutoff,
+                    model_devi_engine,
+                    model_devi_skip,
+                    model_devi_f_avg_relative=model_devi_f_avg_relative,
+                    model_devi_merge_traj=model_devi_merge_traj,
+                    detailed_report_make_fp=detailed_report_make_fp,
+                )
+                
+                # Print model_devi filtering results
+                dlog.info(
+                    "system {:s} {:9s} : f_trust_lo {:6.3f}   v_trust_lo {:6.3f}".format(
+                        ss, "adapted", f_trust_lo_sys, v_trust_lo_sys
+                    )
+                )
+                
+                fp_sum = sum(counter_md.values())
+                if fp_sum > 0:
+                    for cc_key, cc_value in counter_md.items():
+                        dlog.info(
+                            f"system {ss:s} {cc_key:9s} : {cc_value:6d} in {fp_sum:6d} {cc_value / fp_sum * 100:6.2f} %"
+                        )
+                
+                # Now apply COLVAR filtering to the model_devi candidates
+                dlog.info(f"Applying COLVAR filtering to {counter_md['candidate']} model_devi candidates")
+                
+                # Only filter candidate frames selected by model_devi
+                cv_filtered_tasks = []
+                for task in modd_system_task:
+                    for frame in fp_candidate_md:
+                        if isinstance(frame, list) and frame[0] == task:
+                            cv_filtered_tasks.append(task)
+                            break
+                
                 if isinstance(colvar_columns_sys, list):
                     dlog.info(f"Using PLUMED COLVAR for selection with multiple CV columns: {colvar_columns_sys}")
                     for i, col in enumerate(colvar_columns_sys):
@@ -3124,17 +3085,20 @@ def _make_fp_vasp_inner(
                         # Single range for a single column
                         dlog.info(f"Using PLUMED COLVAR for selection with CV column {colvar_columns_sys} and range: [{colvar_lo_sys}, {colvar_hi_sys})")
                 
+                # For uniform selection, inform about it
                 if model_devi_colvar_uniform:
                     dlog.info(f"Using uniform selection across CV values with fp_task_max={fp_task_max}")
                 
+                # Now apply COLVAR filtering to model_devi candidates
+                # We only need to filter the tasks with candidates from model_devi
                 (
-                    fp_rest_accurate,
+                    _,
                     fp_candidate,
-                    fp_rest_failed,
+                    _,
                     counter,
                     candidate_cv_values
                 ) = _select_by_plumed_colvar(
-                    modd_system_task,
+                    cv_filtered_tasks,
                     f_trust_lo_sys,
                     f_trust_hi_sys,
                     v_trust_lo_sys,
@@ -3149,7 +3113,12 @@ def _make_fp_vasp_inner(
                     model_devi_merge_traj=model_devi_merge_traj,
                     detailed_report_make_fp=detailed_report_make_fp,
                     uniform_selection=model_devi_colvar_uniform,
+                    model_devi_candidates=fp_candidate_md,
                 )
+                
+                # Show COLVAR filtering results
+                dlog.info(f"COLVAR filtering results: {counter['candidate']} candidates selected from {counter_md['candidate']} model_devi candidates")
+                dlog.info(f"system {ss:s} COLVAR filtered: {counter['candidate']:6d} in {counter_md['candidate']:6d} {counter['candidate'] / counter_md['candidate'] * 100 if counter_md['candidate'] > 0 else 0:6.2f} %")
                 
                 # Apply uniform selection here, using fp_task_max
                 if model_devi_colvar_uniform and candidate_cv_values:
@@ -3165,10 +3134,13 @@ def _make_fp_vasp_inner(
                     # Extract frames and CV values for sorting
                     candidates_with_cv = []
                     for i, frame in enumerate(fp_candidate):
-                        if len(frame) == 2:  # Regular frame [tt, cc]
-                            key = (frame[0], frame[1])
-                        else:  # Cluster frame [tt, cc, jj]
-                            key = (frame[0], frame[1], frame[2])
+                        if isinstance(frame, list):
+                            if len(frame) == 2:  # Regular frame [tt, cc]
+                                key = (frame[0], frame[1])
+                            else:  # Cluster frame [tt, cc, jj]
+                                key = (frame[0], frame[1], frame[2])
+                        else:
+                            key = frame  # Direct path from _select_by_plumed_colvar
                         
                         if key in candidate_cv_values:
                             candidates_with_cv.append((i, candidate_cv_values[key][primary_cv_idx]))
@@ -3199,7 +3171,7 @@ def _make_fp_vasp_inner(
                     random.shuffle(fp_candidate)
                     fp_candidate = fp_candidate[:fp_task_max]
                     counter["candidate"] = len(fp_candidate)
-                    dlog.info(f"Randomly selected {len(fp_candidate)} frames from {len(candidate_cv_values)} candidates")
+                    dlog.info(f"Randomly selected {len(fp_candidate)} frames from {counter['candidate']} candidates")
             
             elif not model_devi_adapt_trust_lo:
                 (

@@ -2375,9 +2375,19 @@ def _read_plumed_colvar_file(
         # Check if all requested columns exist
         max_col_idx = max(model_devi_colvar_columns)
         if colvar_data.shape[1] <= max_col_idx + 1:
-            dlog.error(f"COLVAR file does not have all requested columns. Need data column index up to {max_col_idx} (0-based, excluding time), but file has only {colvar_data.shape[1] - 1} data columns.")
-            return None
+            dlog.warning(f"COLVAR file does not have all requested columns. Need data column index up to {max_col_idx} (0-based, excluding time), but file has only {colvar_data.shape[1] - 1} data columns.")
             
+            # Filter to only use available columns
+            available_columns = colvar_data.shape[1] - 1  # Subtract 1 for time column
+            valid_columns = [col for col in model_devi_colvar_columns if col < available_columns]
+            if not valid_columns:
+                # If no valid columns remain, use all available columns
+                valid_columns = list(range(available_columns))
+                dlog.info(f"Using all available columns: {valid_columns}")
+            else:
+                dlog.info(f"Using valid columns: {valid_columns}")
+                
+            model_devi_colvar_columns = valid_columns
         # Extract time and selected CV columns
         # Add 1 to model_devi_colvar_columns because column 0 is time
         selected_cols = [0] + [col + 1 for col in model_devi_colvar_columns]
@@ -2522,159 +2532,215 @@ def _select_by_plumed_colvar(
     # Dictionary to collect candidate frames with their CV values for potential uniform selection
     uniform_candidates = {}
     
-    for tt in modd_system_task:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            # Read model deviation data
-            model_devi = _read_model_devi_file(
-                tt, model_devi_f_avg_relative, model_devi_merge_traj
-            )
-            
-            # Read COLVAR data separately
-            colvar_data = _read_plumed_colvar_file(tt, colvar_columns)
-            
-            # Check if we got valid data
-            if colvar_data is None or model_devi is None:
-                dlog.warning(f"Missing model deviation or COLVAR data for {tt}, skipping")
-                continue
+    # If model_devi_candidates is provided, use it for pre-filtering
+    if model_devi_candidates is not None and len(model_devi_candidates) > 0:
+        dlog.info(f"Using {len(model_devi_candidates)} pre-filtered model_devi candidates")
+        
+        # Create a set for faster lookups
+        candidate_set = set()
+        for candidate in model_devi_candidates:
+            if len(candidate) >= 2:
+                # Each candidate is typically [task_path, frame_index]
+                candidate_key = (candidate[0], candidate[1])
+                candidate_set.add(candidate_key)
+        
+        # Collect all COLVAR files needed (once per task) to avoid re-reading them
+        colvar_data_cache = {}
+        for candidate in model_devi_candidates:
+            if len(candidate) >= 2:
+                task_path = candidate[0]
+                if task_path not in colvar_data_cache:
+                    colvar_data = _read_plumed_colvar_file(task_path, colvar_columns)
+                    if colvar_data is not None:
+                        colvar_data_cache[task_path] = colvar_data
+        
+        # Now filter candidates based on COLVAR values
+        for candidate in model_devi_candidates:
+            if len(candidate) >= 2:
+                task_path = candidate[0]
+                frame_idx = candidate[1]
                 
-            # Handle single-row data
-            if model_devi.shape == (7,):
-                model_devi = model_devi.reshape(1, model_devi.shape[0])
-            elif model_devi_engine == "calypso" and model_devi.shape == (8,):
-                model_devi = model_devi.reshape(1, model_devi.shape[0])
-                
-            # Create a dictionary mapping timesteps to CV values for fast lookup
-            # The first column (index 0) of colvar_data is the time
-            # The rest are the CV values corresponding to colvar_columns
-            colvar_dict = {int(row[0]): row[1:] for row in colvar_data}
-            
-            for idx, row in enumerate(model_devi):
-                if idx < model_devi_skip:
+                # Skip if we couldn't read COLVAR data for this task
+                if task_path not in colvar_data_cache:
                     continue
-                step = int(row[0])
-                if step not in colvar_dict:
-                    dlog.debug(f"Step {step} not found in COLVAR data for {tt}, skipping")
+                
+                colvar_data = colvar_data_cache[task_path]
+                if frame_idx >= len(colvar_data):
+                    dlog.warning(f"Frame index {frame_idx} out of range for COLVAR data with {len(colvar_data)} frames in task {task_path}")
                     continue
-                    
-                cv_values = colvar_dict[step]
                 
-                # Check model deviation criteria first
-                f_max = row[4]  # Maximum force deviation
-                v_max = row[1]  # Maximum virial deviation
+                # Get CV values for this frame
+                frame_values = colvar_data[frame_idx]
+                # First value is time, rest are CV values
+                cv_values = frame_values[1:]
                 
-                if model_devi_engine == "calypso":
-                    dist = row[7]
-                    if v_max >= v_trust_lo and v_max < v_trust_hi and f_max >= f_trust_lo and f_max < f_trust_hi and dist >= min_dis:
-                        # Check CV criteria
-                        cv_match = False
-                        # For multi-range criteria
-                        if using_multi_range:
-                            # We need to check if ANY range matches
-                            for range_idx in range(len(colvar_lo[0])):
-                                all_columns_match = True
-                                for col_idx, col_val in enumerate(cv_values):
-                                    lo = colvar_lo[col_idx][range_idx]
-                                    hi = colvar_hi[col_idx][range_idx]
-                                    if not (col_val >= lo and col_val < hi):
-                                        all_columns_match = False
-                                        break
-                                if all_columns_match:
-                                    cv_match = True
-                                    break
-                        else:
-                            # Single range - ALL columns must match their respective ranges
-                            all_columns_match = True
-                            for col_idx, col_val in enumerate(cv_values):
-                                if not (col_val >= colvar_lo[col_idx] and col_val < colvar_hi[col_idx]):
-                                    all_columns_match = False
-                                    break
-                            cv_match = all_columns_match
-                            
-                        if cv_match:
-                            fp_candidate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
-                            counter["candidate"] += 1
-                            # Store CV values for uniform selection
-                            if uniform_selection:
-                                uniform_candidates[os.path.join(tt, "traj", f"{step:d}.lammpstrj")] = cv_values
-                    elif f_max >= f_trust_hi or v_max >= v_trust_hi:
-                        fp_rest_failed.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
-                        counter["failed"] += 1
-                    else:
-                        fp_rest_accurate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
-                        counter["accurate"] += 1
-                # For non-calypso engines
+                # Check if frame's CV values are within bounds
+                in_range = True
+                
+                # Handle multi-range case
+                if using_multi_range:
+                    for i, col_idx in enumerate(colvar_columns):
+                        col_in_range = False
+                        actual_idx = min(i, len(cv_values) - 1)  # Prevent index out of range
+                        cv_value = cv_values[actual_idx]
+                        
+                        # Check if value is in any of the ranges for this column
+                        for lo, hi in zip(colvar_lo[i], colvar_hi[i]):
+                            if lo <= cv_value <= hi:
+                                col_in_range = True
+                                break
+                        
+                        if not col_in_range:
+                            in_range = False
+                            break
+                # Handle single-range case
                 else:
-                    if v_max >= v_trust_lo and v_max < v_trust_hi and f_max >= f_trust_lo and f_max < f_trust_hi:
-                        # Check CV criteria
-                        cv_match = False
-                        # For multi-range criteria
-                        if using_multi_range:
-                            # We need to check if ANY range matches
-                            for range_idx in range(len(colvar_lo[0])):
-                                all_columns_match = True
-                                for col_idx, col_val in enumerate(cv_values):
-                                    lo = colvar_lo[col_idx][range_idx]
-                                    hi = colvar_hi[col_idx][range_idx]
-                                    if not (col_val >= lo and col_val < hi):
-                                        all_columns_match = False
-                                        break
-                                if all_columns_match:
-                                    cv_match = True
-                                    dlog.debug(f"Step {step} matched CV range {range_idx}: {cv_values}")
-                                    break
-                        else:
-                            # Single range - ALL columns must match their respective ranges
-                            all_columns_match = True
-                            for col_idx, col_val in enumerate(cv_values):
-                                if not (col_val >= colvar_lo[col_idx] and col_val < colvar_hi[col_idx]):
-                                    all_columns_match = False
-                                    break
-                            cv_match = all_columns_match
-                            if cv_match:
-                                dlog.debug(f"Step {step} matched CV range: {cv_values}")
-                            
-                        if cv_match:
-                            if model_devi_merge_traj:
-                                fp_candidate.append(os.path.join(tt, "all.lammpstrj/{}".format(step)))
-                            else:
-                                fp_candidate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
-                            counter["candidate"] += 1
-                            # Store CV values for uniform selection
-                            if uniform_selection:
-                                if model_devi_merge_traj:
-                                    uniform_candidates[os.path.join(tt, "all.lammpstrj/{}".format(step))] = cv_values
-                                else:
-                                    uniform_candidates[os.path.join(tt, "traj", f"{step:d}.lammpstrj")] = cv_values
-                    elif f_max >= f_trust_hi or v_max >= v_trust_hi:
-                        if model_devi_merge_traj:
-                            fp_rest_failed.append(os.path.join(tt, "all.lammpstrj/{}".format(step)))
-                        else:
-                            fp_rest_failed.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
-                        counter["failed"] += 1
-                    else:
-                        if model_devi_merge_traj:
-                            fp_rest_accurate.append(os.path.join(tt, "all.lammpstrj/{}".format(step)))
-                        else:
-                            fp_rest_accurate.append(os.path.join(tt, "traj", f"{step:d}.lammpstrj"))
+                    for i, col_idx in enumerate(colvar_columns):
+                        actual_idx = min(i, len(cv_values) - 1)  # Prevent index out of range
+                        cv_value = cv_values[actual_idx]
+                        if not (colvar_lo[i] <= cv_value <= colvar_hi[i]):
+                            in_range = False
+                            break
+                
+                if in_range:
+                    # This frame is within the CV bounds
+                    fp_candidate.append(candidate)
+                    counter["candidate"] += 1
+                    
+                    # Store CV values for potential uniform selection
+                    if uniform_selection:
+                        uniform_candidates[tuple(candidate)] = cv_values
+                else:
+                    # This frame is not within CV bounds
+                    counter["failed"] += 1
+                    if detailed_report_make_fp:
+                        fp_rest_failed.append(candidate)
+        
+        dlog.info(f"After COLVAR filtering: {counter['candidate']} candidates out of {len(model_devi_candidates)} model_devi candidates")
+        
+    # If no pre-filtered candidates or pre-filtered resulted in empty selection, 
+    # do regular filtering using the model deviation and COLVAR values
+    else:
+        dlog.info("No pre-filtered candidates provided, performing full filtering")
+        for tt in modd_system_task:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # Read model deviation data
+                model_devi = _read_model_devi_file(
+                    tt, model_devi_f_avg_relative, model_devi_merge_traj
+                )
+                
+                # Read COLVAR data separately
+                colvar_data = _read_plumed_colvar_file(tt, colvar_columns)
+                
+                # Check if we got valid data
+                if colvar_data is None or model_devi is None:
+                    continue
+                
+                # Check if we have matching lengths between model_devi and colvar
+                if len(model_devi) != len(colvar_data):
+                    dlog.warning(f"Mismatch between model_devi ({len(model_devi)} frames) and colvar ({len(colvar_data)} frames) in {tt}")
+                    # Use minimum length to avoid index errors
+                    n_frames = min(len(model_devi), len(colvar_data))
+                    model_devi = model_devi[:n_frames]
+                    colvar_data = colvar_data[:n_frames]
+                
+                # Apply model_devi_skip to both datasets
+                model_devi = model_devi[model_devi_skip:]
+                colvar_data = colvar_data[model_devi_skip:len(model_devi) + model_devi_skip]
+                
+                # Process each frame
+                for ii in range(len(model_devi)):
+                    # First check if the frame passes the model deviation filter
+                    if model_devi[ii][2] < f_trust_lo or model_devi[ii][4] < v_trust_lo:
+                        # accurate
+                        if detailed_report_make_fp:
+                            fp_rest_accurate.append([tt, ii])
                         counter["accurate"] += 1
+                        continue
+                    
+                    if model_devi[ii][2] > f_trust_hi or model_devi[ii][4] > v_trust_hi:
+                        # failed
+                        if detailed_report_make_fp:
+                            fp_rest_failed.append([tt, ii])
+                        counter["failed"] += 1
+                        continue
+                    
+                    # Frame passed model deviation filter, now check CV values
+                    cv_values = colvar_data[ii][1:]  # Skip the time column
+                    
+                    # Check if CV values are within bounds
+                    in_range = True
+                    
+                    # Handle multi-range case
+                    if using_multi_range:
+                        for i, col_idx in enumerate(colvar_columns):
+                            col_in_range = False
+                            cv_value = cv_values[min(i, len(cv_values) - 1)]  # Prevent index out of range
+                            
+                            # Check if value is in any of the ranges for this column
+                            for lo, hi in zip(colvar_lo[i], colvar_hi[i]):
+                                if lo <= cv_value <= hi:
+                                    col_in_range = True
+                                    break
+                            
+                            if not col_in_range:
+                                in_range = False
+                                break
+                    # Handle single-range case
+                    else:
+                        for i, col_idx in enumerate(colvar_columns):
+                            cv_value = cv_values[min(i, len(cv_values) - 1)]  # Prevent index out of range
+                            if not (colvar_lo[i] <= cv_value <= colvar_hi[i]):
+                                in_range = False
+                                break
+                    
+                    if in_range:
+                        # This frame is within the CV bounds
+                        fp_candidate.append([tt, ii])
+                        counter["candidate"] += 1
+                        
+                        # Store CV values for potential uniform selection
+                        if uniform_selection:
+                            uniform_candidates[tuple([tt, ii])] = cv_values
+                    else:
+                        # This frame is not within CV bounds
+                        if detailed_report_make_fp:
+                            fp_rest_failed.append([tt, ii])
+                        counter["failed"] += 1
     
-    dlog.info(f"PLUMED CV selection results: {counter['candidate']} candidates, {counter['failed']} failed, {counter['accurate']} accurate.")
-    
-    # For detailed reports
-    if detailed_report_make_fp:
-        report_t = {"failed": (counter["failed"], fp_rest_failed), 
-                  "accurate": (counter["accurate"], fp_rest_accurate),
-                  "candidate": (counter["candidate"], fp_candidate)}
-        level_count = {}
-        for key1, all_conf in report_t.items():
-            all_conf_count = all_conf[0]
-            if all_conf_count > 0:
-                count_percent = float(all_conf_count) / float(all_conf_count) * 100.0
-                level_count[key1] = '%.2f %% (%d)' % (count_percent, all_conf_count)
-        dlog.info(f"PLUMED CV level count: {level_count}")
-    
-    return fp_rest_accurate, fp_candidate, fp_rest_failed, cc, uniform_candidates
+    # Apply uniform selection if requested and we have enough candidates
+    if uniform_selection and len(uniform_candidates) > 0:
+        dlog.info(f"Applying uniform selection to {len(uniform_candidates)} candidates")
+        
+        # If we have multiple CV columns, we'll use the first one for uniform selection
+        # (It's hard to uniformly sample in multiple dimensions simultaneously)
+        primary_cv_idx = 0  # Use the first CV column for uniform selection
+        
+        # Extract frames and CV values for sorting
+        candidate_frames = []
+        primary_cv_values = []
+        
+        for frame, cv_values in uniform_candidates.items():
+            candidate_frames.append(frame)
+            # Use the first CV column value for sorting
+            primary_cv_values.append(cv_values[primary_cv_idx])
+        
+        # Sort frames by CV value
+        sorted_idx = np.argsort(primary_cv_values)
+        sorted_frames = [candidate_frames[i] for i in sorted_idx]
+        sorted_values = [primary_cv_values[i] for i in sorted_idx]
+        
+        # Determine how many frames to select evenly
+        cv_min = min(primary_cv_values) if primary_cv_values else 0
+        cv_max = max(primary_cv_values) if primary_cv_values else 0
+        cv_range = cv_max - cv_min
+        
+        dlog.info(f"CV range for uniform selection: [{cv_min}, {cv_max}]")
+        
+        # We'll keep the original fp_candidate for now, as the outer code will apply fp_task_max constraint
+        
+    return fp_rest_accurate, fp_candidate, fp_rest_failed, counter, uniform_candidates
 
 
 def _select_by_model_devi_standard(
@@ -3091,88 +3157,71 @@ def _make_fp_vasp_inner(
                 
                 # Now apply COLVAR filtering to model_devi candidates
                 # We only need to filter the tasks with candidates from model_devi
-                (
-                    _,
-                    fp_candidate,
-                    _,
-                    counter,
-                    candidate_cv_values
-                ) = _select_by_plumed_colvar(
-                    cv_filtered_tasks,
-                    f_trust_lo_sys,
-                    f_trust_hi_sys,
-                    v_trust_lo_sys,
-                    v_trust_hi_sys,
-                    colvar_lo_sys,
-                    colvar_hi_sys,
-                    colvar_columns_sys,
-                    cluster_cutoff,
-                    model_devi_engine,
-                    model_devi_skip,
-                    model_devi_f_avg_relative=model_devi_f_avg_relative,
-                    model_devi_merge_traj=model_devi_merge_traj,
-                    detailed_report_make_fp=detailed_report_make_fp,
-                    uniform_selection=model_devi_colvar_uniform,
-                    model_devi_candidates=fp_candidate_md,
-                )
-                
-                # Show COLVAR filtering results
-                dlog.info(f"COLVAR filtering results: {counter['candidate']} candidates selected from {counter_md['candidate']} model_devi candidates")
-                dlog.info(f"system {ss:s} COLVAR filtered: {counter['candidate']:6d} in {counter_md['candidate']:6d} {counter['candidate'] / counter_md['candidate'] * 100 if counter_md['candidate'] > 0 else 0:6.2f} %")
-                
-                # Apply uniform selection here, using fp_task_max
-                if model_devi_colvar_uniform and candidate_cv_values:
-                    dlog.info(f"Applying uniform selection from {len(fp_candidate)} candidate frames with max tasks {fp_task_max}")
+                try:
+                    (
+                        _,
+                        fp_candidate,
+                        _,
+                        counter,
+                        candidate_cv_values
+                    ) = _select_by_plumed_colvar(
+                        cv_filtered_tasks,
+                        f_trust_lo_sys,
+                        f_trust_hi_sys,
+                        v_trust_lo_sys,
+                        v_trust_hi_sys,
+                        colvar_lo_sys,
+                        colvar_hi_sys,
+                        colvar_columns_sys,
+                        cluster_cutoff,
+                        model_devi_engine,
+                        model_devi_skip,
+                        model_devi_f_avg_relative=model_devi_f_avg_relative,
+                        model_devi_merge_traj=model_devi_merge_traj,
+                        detailed_report_make_fp=detailed_report_make_fp,
+                        uniform_selection=model_devi_colvar_uniform,
+                        model_devi_candidates=fp_candidate_md,
+                    )
                     
-                    # Determine number of frames to select - respect fp_task_max
-                    n_select = min(fp_task_max, len(fp_candidate))
-                    
-                    # If we have multiple CV columns, we'll use the first one for uniform selection
-                    # (It's hard to uniformly sample in multiple dimensions simultaneously)
-                    primary_cv_idx = 0  # Use the first CV column for uniform selection
-                    
-                    # Extract frames and CV values for sorting
-                    candidates_with_cv = []
-                    for i, frame in enumerate(fp_candidate):
-                        if isinstance(frame, list):
-                            if len(frame) == 2:  # Regular frame [tt, cc]
-                                key = (frame[0], frame[1])
-                            else:  # Cluster frame [tt, cc, jj]
-                                key = (frame[0], frame[1], frame[2])
+                    # Show COLVAR filtering results
+                    if isinstance(counter, dict) and isinstance(counter_md, dict) and 'candidate' in counter and 'candidate' in counter_md:
+                        dlog.info(f"COLVAR filtering results: {counter['candidate']} candidates selected from {counter_md['candidate']} model_devi candidates")
+                        if counter_md['candidate'] > 0:
+                            dlog.info(f"system {ss:s} COLVAR filtered: {counter['candidate']:6d} in {counter_md['candidate']:6d} {counter['candidate'] / counter_md['candidate'] * 100:6.2f} %")
                         else:
-                            key = frame  # Direct path from _select_by_plumed_colvar
-                        
-                        if key in candidate_cv_values:
-                            candidates_with_cv.append((i, candidate_cv_values[key][primary_cv_idx]))
-                    
-                    # Sort by CV value
-                    candidates_with_cv.sort(key=lambda x: x[1])
-                    
-                    # Select frames uniformly from the sorted list
-                    if n_select >= len(candidates_with_cv):
-                        # If we want all frames, just use them all
-                        selected_indices = [x[0] for x in candidates_with_cv]
+                            dlog.info(f"system {ss:s} COLVAR filtered: {counter['candidate']:6d} in {counter_md['candidate']:6d} 0.00 %")
                     else:
-                        # Calculate step size for uniform selection
-                        step = len(candidates_with_cv) / n_select
-                        # Generate indices at regular intervals
-                        selected_indices = [candidates_with_cv[min(int(i * step), len(candidates_with_cv) - 1)][0] for i in range(n_select)]
+                        dlog.info(f"COLVAR filtering: No candidates found that match criteria")
+                        # Initialize empty collections if they're not properly returned
+                        if not isinstance(counter, dict):
+                            counter = Counter()
+                            counter["candidate"] = 0
+                        if not isinstance(fp_candidate, list):
+                            fp_candidate = []
+                        candidate_cv_values = {}
                     
-                    # Create new candidate list from selected frames
-                    new_fp_candidate = [fp_candidate[idx] for idx in selected_indices]
-                    fp_candidate = new_fp_candidate
+                    # Save model_devi candidates to model_devi.candidates.{ss}.out file in 02.fp folder
+                    fp_path = os.path.abspath(os.path.join(work_path, os.pardir, "02.fp"))
+                    os.makedirs(fp_path, exist_ok=True)
                     
-                    # Update counter
-                    counter["candidate"] = len(fp_candidate)
-                    dlog.info(f"Selected {len(fp_candidate)} frames with uniform distribution across CV values")
-                
-                elif len(fp_candidate) > fp_task_max:
-                    # Standard random selection if not using uniform selection
-                    random.shuffle(fp_candidate)
-                    fp_candidate = fp_candidate[:fp_task_max]
-                    counter["candidate"] = len(fp_candidate)
-                    dlog.info(f"Randomly selected {len(fp_candidate)} frames from {counter['candidate']} candidates")
-            
+                    with open(os.path.join(fp_path, f"model_devi.candidates.{ss}.out"), "w") as fp:
+                        for ii in fp_candidate_md:
+                            fp.write(" ".join([str(nn) for nn in ii]) + "\n")
+                    
+                    # Save COLVAR filtered candidates to colvar.candidates.{ss}.out file in 02.fp folder
+                    with open(os.path.join(fp_path, f"colvar.candidates.{ss}.out"), "w") as fp:
+                        for ii in fp_candidate:
+                            fp.write(" ".join([str(nn) for nn in ii]) + "\n")
+                            
+                except Exception as e:
+                    dlog.error(f"Error during COLVAR filtering: {str(e)}")
+                    dlog.info("Falling back to model_devi candidates only")
+                    import traceback
+                    dlog.debug(f"Traceback: {traceback.format_exc()}")
+                    counter = Counter()
+                    counter["candidate"] = len(fp_candidate_md) if isinstance(fp_candidate_md, list) else 0
+                    fp_candidate = fp_candidate_md
+                    candidate_cv_values = {}
             elif not model_devi_adapt_trust_lo:
                 (
                     fp_rest_accurate,

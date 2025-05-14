@@ -504,8 +504,9 @@ The union of the two sets is made as candidate dataset."
         ),
         Argument(
             "model_devi_plumed_path",
-            str,
+            bool,
             optional=True,
+            default=False,
             doc=doc_model_devi_plumed_path,
         ),
         Argument(
@@ -516,11 +517,15 @@ The union of the two sets is made as candidate dataset."
             doc=doc_model_devi_plumed_cv_columns,
         ),
         Argument(
-            "shuffle_poscar", bool, optional=True, doc=doc_shuffle_poscar
+            "shuffle_poscar", bool, optional=True, default=False, doc=doc_shuffle_poscar
         ),
-        Argument("use_relative", bool, optional=True, doc=doc_use_relative),
+        Argument(
+            "use_relative", bool, optional=True, default=False, doc=doc_use_relative
+        ),
         Argument("epsilon", float, optional=True, doc=doc_epsilon),
-        Argument("use_relative_v", bool, optional=True, doc=doc_use_relative_v),
+        Argument(
+            "use_relative_v", bool, optional=True, default=False, doc=doc_use_relative_v
+        ),
         Argument("epsilon_v", float, optional=True, doc=doc_epsilon_v),
         Argument(
             "model_devi_use_plumed_colvar",

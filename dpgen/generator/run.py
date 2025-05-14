@@ -2158,7 +2158,7 @@ def run_md_model_devi(iter_index, jdata, mdata):
 def run_model_devi(iter_index, jdata, mdata):
     model_devi_engine = jdata.get("model_devi_engine", "lammps")
     if model_devi_engine != "calypso":
-        run_md_model_devi(iter_index, jdata, mdata)  
+        run_md_model_devi(iter_index, jdata, mdata)
     else:
         run_calypso_model_devi(iter_index, jdata, mdata)
 
@@ -2954,8 +2954,8 @@ def _make_fp_vasp_inner(
     v_trust_hi,
     f_trust_lo,
     f_trust_hi,
-    fp_task_max,
     fp_task_min,
+    fp_task_max,
     fp_link_files,
     type_map,
     jdata,
@@ -3050,179 +3050,9 @@ def _make_fp_vasp_inner(
             f_trust_hi_sys = _trust_limitation_check(int(ss), f_trust_hi)
             v_trust_lo_sys = _trust_limitation_check(int(ss), v_trust_lo)
             v_trust_hi_sys = _trust_limitation_check(int(ss), v_trust_hi)
-            
-            # Get system-specific values for COLVAR thresholds
-            # Handle both single value and multiple columns/values cases
-            if isinstance(model_devi_colvar_columns, list):
-                colvar_columns_sys = model_devi_colvar_columns
-                
-                # If colvar_lo is a list of lists/dicts (one per system and column)
-                if isinstance(model_devi_colvar_lo, (list, dict)) and any(isinstance(x, (list, dict)) for x in model_devi_colvar_lo):
-                    colvar_lo_sys = _trust_limitation_check(int(ss), model_devi_colvar_lo)
-                else:
-                    # If colvar_lo is a simple list (one per column, same for all systems)
-                    colvar_lo_sys = model_devi_colvar_lo
-                
-                # If colvar_hi is a list of lists/dicts (one per system and column)
-                if isinstance(model_devi_colvar_hi, (list, dict)) and any(isinstance(x, (list, dict)) for x in model_devi_colvar_hi):
-                    colvar_hi_sys = _trust_limitation_check(int(ss), model_devi_colvar_hi)
-                else:
-                    # If colvar_hi is a simple list (one per column, same for all systems)
-                    colvar_hi_sys = model_devi_colvar_hi
-            else:
-                # Single column case
-                colvar_columns_sys = model_devi_colvar_columns
-                colvar_lo_sys = _trust_limitation_check(int(ss), model_devi_colvar_lo) if isinstance(model_devi_colvar_lo, (list, dict)) else model_devi_colvar_lo
-                colvar_hi_sys = _trust_limitation_check(int(ss), model_devi_colvar_hi) if isinstance(model_devi_colvar_hi, (list, dict)) else model_devi_colvar_hi
 
             # assumed e -> v
-            if model_devi_use_plumed_colvar:
-                # First apply model_devi filtering and show results
-                (
-                    fp_rest_accurate,
-                    fp_candidate_md,
-                    fp_rest_failed,
-                    counter_md,
-                ) = _select_by_model_devi_standard(
-                    modd_system_task,
-                    f_trust_lo_sys,
-                    f_trust_hi_sys,
-                    v_trust_lo_sys,
-                    v_trust_hi_sys,
-                    cluster_cutoff,
-                    model_devi_engine,
-                    model_devi_skip,
-                    model_devi_f_avg_relative=model_devi_f_avg_relative,
-                    model_devi_merge_traj=model_devi_merge_traj,
-                    detailed_report_make_fp=detailed_report_make_fp,
-                )
-                
-                # Print model_devi filtering results
-                dlog.info(
-                    "system {:s} {:9s} : f_trust_lo {:6.3f}   v_trust_lo {:6.3f}".format(
-                        ss, "adapted", f_trust_lo_sys, v_trust_lo_sys
-                    )
-                )
-                
-                fp_sum = sum(counter_md.values())
-                if fp_sum > 0:
-                    for cc_key, cc_value in counter_md.items():
-                        dlog.info(
-                            f"system {ss:s} {cc_key:9s} : {cc_value:6d} in {fp_sum:6d} {cc_value / fp_sum * 100:6.2f} %"
-                        )
-                
-                # Now apply COLVAR filtering to the model_devi candidates
-                dlog.info(f"Applying COLVAR filtering to {counter_md['candidate']} model_devi candidates")
-                
-                # Only filter candidate frames selected by model_devi
-                cv_filtered_tasks = []
-                for task in modd_system_task:
-                    for frame in fp_candidate_md:
-                        if isinstance(frame, list) and frame[0] == task:
-                            cv_filtered_tasks.append(task)
-                            break
-                
-                if isinstance(colvar_columns_sys, list):
-                    dlog.info(f"Using PLUMED COLVAR for selection with multiple CV columns: {colvar_columns_sys}")
-                    for i, col in enumerate(colvar_columns_sys):
-                        if isinstance(colvar_lo_sys, list) and isinstance(colvar_lo_sys[i], list):
-                            # Multi-range case
-                            ranges_info = []
-                            for j in range(len(colvar_lo_sys[i])):
-                                lo = colvar_lo_sys[i][j]
-                                hi = colvar_hi_sys[i][j]
-                                ranges_info.append(f"[{lo}, {hi})")
-                            dlog.info(f"  Column {col}: ranges {', '.join(ranges_info)}")
-                        else:
-                            # Single range case
-                            lo = colvar_lo_sys[i] if isinstance(colvar_lo_sys, list) else colvar_lo_sys
-                            hi = colvar_hi_sys[i] if isinstance(colvar_hi_sys, list) else colvar_hi_sys
-                            dlog.info(f"  Column {col}: range [{lo}, {hi})")
-                else:
-                    if isinstance(colvar_lo_sys, list) and isinstance(colvar_lo_sys[0], list):
-                        # Multi-range case for a single column
-                        ranges_info = []
-                        for j in range(len(colvar_lo_sys[0])):
-                            lo = colvar_lo_sys[0][j]
-                            hi = colvar_hi_sys[0][j]
-                            ranges_info.append(f"[{lo}, {hi})")
-                        dlog.info(f"Using PLUMED COLVAR for selection with CV column {colvar_columns_sys} and ranges: {', '.join(ranges_info)}")
-                    else:
-                        # Single range for a single column
-                        dlog.info(f"Using PLUMED COLVAR for selection with CV column {colvar_columns_sys} and range: [{colvar_lo_sys}, {colvar_hi_sys})")
-                
-                # For uniform selection, inform about it
-                if model_devi_colvar_uniform:
-                    dlog.info(f"Using uniform selection across CV values with fp_task_max={fp_task_max}")
-                
-                # Now apply COLVAR filtering to model_devi candidates
-                # We only need to filter the tasks with candidates from model_devi
-                try:
-                    (
-                        _,
-                        fp_candidate,
-                        _,
-                        counter,
-                        candidate_cv_values
-                    ) = _select_by_plumed_colvar(
-                        cv_filtered_tasks,
-                        f_trust_lo_sys,
-                        f_trust_hi_sys,
-                        v_trust_lo_sys,
-                        v_trust_hi_sys,
-                        colvar_lo_sys,
-                        colvar_hi_sys,
-                        colvar_columns_sys,
-                        cluster_cutoff,
-                        model_devi_engine,
-                        model_devi_skip,
-                        model_devi_f_avg_relative=model_devi_f_avg_relative,
-                        model_devi_merge_traj=model_devi_merge_traj,
-                        detailed_report_make_fp=detailed_report_make_fp,
-                        uniform_selection=model_devi_colvar_uniform,
-                        model_devi_candidates=fp_candidate_md,
-                    )
-                    
-                    # Show COLVAR filtering results
-                    if isinstance(counter, dict) and isinstance(counter_md, dict) and 'candidate' in counter and 'candidate' in counter_md:
-                        dlog.info(f"COLVAR filtering results: {counter['candidate']} candidates selected from {counter_md['candidate']} model_devi candidates")
-                        if counter_md['candidate'] > 0:
-                            dlog.info(f"system {ss:s} COLVAR filtered: {counter['candidate']:6d} in {counter_md['candidate']:6d} {counter['candidate'] / counter_md['candidate'] * 100:6.2f} %")
-                        else:
-                            dlog.info(f"system {ss:s} COLVAR filtered: {counter['candidate']:6d} in {counter_md['candidate']:6d} 0.00 %")
-                    else:
-                        dlog.info(f"COLVAR filtering: No candidates found that match criteria")
-                        # Initialize empty collections if they're not properly returned
-                        if not isinstance(counter, dict):
-                            counter = Counter()
-                            counter["candidate"] = 0
-                        if not isinstance(fp_candidate, list):
-                            fp_candidate = []
-                        candidate_cv_values = {}
-                    
-                    # Save model_devi candidates to model_devi.candidates.{ss}.out file in 02.fp folder
-                    fp_path = os.path.abspath(os.path.join(work_path, os.pardir, "02.fp"))
-                    os.makedirs(fp_path, exist_ok=True)
-                    
-                    with open(os.path.join(fp_path, f"model_devi.candidates.{ss}.out"), "w") as fp:
-                        for ii in fp_candidate_md:
-                            fp.write(" ".join([str(nn) for nn in ii]) + "\n")
-                    
-                    # Save COLVAR filtered candidates to colvar.candidates.{ss}.out file in 02.fp folder
-                    with open(os.path.join(fp_path, f"colvar.candidates.{ss}.out"), "w") as fp:
-                        for ii in fp_candidate:
-                            fp.write(" ".join([str(nn) for nn in ii]) + "\n")
-                            
-                except Exception as e:
-                    dlog.error(f"Error during COLVAR filtering: {str(e)}")
-                    dlog.info("Falling back to model_devi candidates only")
-                    import traceback
-                    dlog.debug(f"Traceback: {traceback.format_exc()}")
-                    counter = Counter()
-                    counter["candidate"] = len(fp_candidate_md) if isinstance(fp_candidate_md, list) else 0
-                    fp_candidate = fp_candidate_md
-                    candidate_cv_values = {}
-            elif not model_devi_adapt_trust_lo:
+            if not model_devi_adapt_trust_lo:
                 (
                     fp_rest_accurate,
                     fp_candidate,
@@ -3241,9 +3071,33 @@ def _make_fp_vasp_inner(
                     model_devi_merge_traj=model_devi_merge_traj,
                     detailed_report_make_fp=detailed_report_make_fp,
                 )
+            else:
+                numb_candi_f = jdata.get("model_devi_numb_candi_f", 10)
+                numb_candi_v = jdata.get("model_devi_numb_candi_v", 0)
+                perc_candi_f = jdata.get("model_devi_perc_candi_f", 0.0)
+                perc_candi_v = jdata.get("model_devi_perc_candi_v", 0.0)
+                (
+                    fp_rest_accurate,
+                    fp_candidate,
+                    fp_rest_failed,
+                    counter,
+                    f_trust_lo_ad,
+                    v_trust_lo_ad,
+                ) = _select_by_model_devi_adaptive_trust_low(
+                    modd_system_task,
+                    f_trust_hi_sys,
+                    numb_candi_f,
+                    perc_candi_f,
+                    v_trust_hi_sys,
+                    numb_candi_v,
+                    perc_candi_v,
+                    model_devi_skip=model_devi_skip,
+                    model_devi_f_avg_relative=model_devi_f_avg_relative,
+                    model_devi_merge_traj=model_devi_merge_traj,
+                )
                 dlog.info(
                     "system {:s} {:9s} : f_trust_lo {:6.3f}   v_trust_lo {:6.3f}".format(
-                        ss, "adapted", f_trust_lo_sys, v_trust_lo_sys
+                        ss, "adapted", f_trust_lo_ad, v_trust_lo_ad
                     )
                 )
         elif model_devi_engine == "amber":

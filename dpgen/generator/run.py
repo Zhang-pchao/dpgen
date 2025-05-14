@@ -1512,7 +1512,7 @@ def _make_model_devi_revmat(iter_index, jdata, mdata, conf_systems):
                     total_rev_keys[:total_num_lmp],
                     total_rev_item[:total_num_lmp],
                 )
-                # revise input of plumed
+                # revise inputs of plumed
                 if use_plm:
                     lmp_lines = revise_lmp_input_plm(lmp_lines, "input.plumed")
                     shutil.copyfile(plm_templ, "input.plumed")
